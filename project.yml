@@ -1,0 +1,112 @@
+# XcodeGen spec for SwiftTorrent. Regenerate the project with:  xcodegen generate
+# The generated .xcodeproj is committed; this file is the source of truth.
+name: SwiftTorrent
+options:
+  bundleIdPrefix: dev.nwf
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "0.1.0"
+    # Local, ad-hoc signing — no team required.
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGNING_ALLOWED: "YES"
+
+targets:
+  # The dependency-free protocol engine, linked statically into everything.
+  TorrentEngine:
+    type: library.static
+    platform: macOS
+    sources:
+      - Sources/TorrentEngine
+    settings:
+      base:
+        PRODUCT_NAME: TorrentEngine
+        ENABLE_TESTABILITY: "YES"
+
+  # The SwiftUI macOS app.
+  SwiftTorrentApp:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/SwiftTorrentApp
+      - path: Resources/AppIcon.icns
+        buildPhase: resources
+    dependencies:
+      - target: TorrentEngine
+    settings:
+      base:
+        PRODUCT_NAME: SwiftTorrent
+        PRODUCT_BUNDLE_IDENTIFIER: dev.nwf.SwiftTorrent
+    info:
+      path: SwiftTorrent-Info.plist
+      properties:
+        CFBundleDisplayName: SwiftTorrent
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "0.1.0"
+        CFBundleIconFile: AppIcon
+        LSMinimumSystemVersion: "15.0"
+        LSApplicationCategoryType: public.app-category.utilities
+        NSHighResolutionCapable: true
+        NSPrincipalClass: NSApplication
+        CFBundleURLTypes:
+          - CFBundleURLName: Magnet Link
+            CFBundleURLSchemes: [magnet]
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: BitTorrent Document
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Default
+            LSItemContentTypes: [org.bittorrent.torrent]
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: org.bittorrent.torrent
+            UTTypeDescription: BitTorrent Document
+            UTTypeConformsTo: [public.data]
+            UTTypeTagSpecification:
+              public.filename-extension: [torrent]
+              public.mime-type: [application/x-bittorrent]
+
+  # The CLI engine harness (standalone, statically linked).
+  storrent:
+    type: tool
+    platform: macOS
+    sources:
+      - Sources/storrent
+    dependencies:
+      - target: TorrentEngine
+    settings:
+      base:
+        PRODUCT_NAME: storrent
+
+  # Swift Testing unit + loopback E2E suites.
+  TorrentEngineTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/TorrentEngineTests
+    dependencies:
+      - target: TorrentEngine
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.nwf.TorrentEngineTests
+        GENERATE_INFOPLIST_FILE: "YES"
+
+schemes:
+  SwiftTorrent:
+    build:
+      targets:
+        SwiftTorrentApp: all
+        storrent: all
+        TorrentEngineTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - TorrentEngineTests

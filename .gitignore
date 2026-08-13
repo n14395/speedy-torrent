@@ -1,0 +1,15 @@
+# Build output
+.build/
+dist/
+
+# Xcode
+.xcodebuild/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+.swiftpm/
+
+# macOS
+.DS_Store
+._*

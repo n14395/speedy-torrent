@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bgM" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0081C3"/>
+      <stop offset="1" stop-color="#00C1B3"/>
+    </linearGradient>
+    <radialGradient id="shineM" cx="0.3" cy="0.15" r="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.26"/>
+      <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="squircleM">
+      <rect width="1024" height="1024" rx="230"/>
+    </clipPath>
+    <filter id="dropM" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="22" flood-color="#003A4D" flood-opacity="0.32"/>
+    </filter>
+    <clipPath id="magnetBodyM">
+      <path d="M 272 450 A 240 240 0 0 1 752 450 L 752 760 L 632 760 L 632 450 A 120 120 0 0 0 392 450 L 392 760 L 272 760 Z"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#squircleM)">
+    <rect width="1024" height="1024" fill="url(#bgM)"/>
+    <rect width="1024" height="1024" fill="url(#shineM)"/>
+  </g>
+  <g filter="url(#dropM)">
+    <path d="M 272 450 A 240 240 0 0 1 752 450 L 752 760 L 632 760 L 632 450 A 120 120 0 0 0 392 450 L 392 760 L 272 760 Z"
+          fill="#FFFFFF" stroke="#FFFFFF" stroke-width="24" stroke-linejoin="round"/>
+    <g clip-path="url(#magnetBodyM)">
+      <rect x="260" y="672" width="144" height="100" fill="#006E8F" fill-opacity="0.4"/>
+      <rect x="620" y="672" width="144" height="100" fill="#006E8F" fill-opacity="0.4"/>
+    </g>
+  </g>
+</svg>
