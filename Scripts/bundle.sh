@@ -1,11 +1,11 @@
 #!/bin/zsh
-# Assemble SwiftTorrent.app from the SwiftPM release build.
+# Assemble SpeedyTorrent.app from the SwiftPM release build.
 # Usage: Scripts/bundle.sh [output-dir]   (default: ./dist)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$ROOT/dist}"
-APP="$OUT/SwiftTorrent.app"
+APP="$OUT/SpeedyTorrent.app"
 VERSION="0.1.0"
 
 cd "$ROOT"
@@ -19,12 +19,12 @@ done
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
 fi
-swift build -c release --product SwiftTorrentApp
+swift build -c release --product SpeedyTorrentApp
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-cp "$(swift build -c release --show-bin-path)/SwiftTorrentApp" "$APP/Contents/MacOS/SwiftTorrent"
+cp "$(swift build -c release --show-bin-path)/SpeedyTorrentApp" "$APP/Contents/MacOS/SpeedyTorrent"
 
 if [[ -f "$ROOT/Resources/AppIcon.icns" ]]; then
   cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
@@ -36,13 +36,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>SwiftTorrent</string>
+    <string>SpeedyTorrent</string>
     <key>CFBundleDisplayName</key>
-    <string>SwiftTorrent</string>
+    <string>SpeedyTorrent</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.nwf.SwiftTorrent</string>
+    <string>dev.nwf.SpeedyTorrent</string>
     <key>CFBundleExecutable</key>
-    <string>SwiftTorrent</string>
+    <string>SpeedyTorrent</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

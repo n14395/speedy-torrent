@@ -9,7 +9,7 @@ public struct HTTPTrackerClient: Sendable {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 30
         config.httpAdditionalHeaders = [
-            "User-Agent": "SwiftTorrent/\(TorrentEngineInfo.version)"
+            "User-Agent": "SpeedyTorrent/\(TorrentEngineInfo.version)"
         ]
         session = URLSession(configuration: config)
     }

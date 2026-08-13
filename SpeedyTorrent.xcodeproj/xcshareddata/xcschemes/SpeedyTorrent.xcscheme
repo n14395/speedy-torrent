@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "4F1545B8FC53E321B1E70467"
-               BuildableName = "SwiftTorrentApp.app"
-               BlueprintName = "SwiftTorrentApp"
-               ReferencedContainer = "container:SwiftTorrent.xcodeproj">
+               BuildableName = "SpeedyTorrentApp.app"
+               BlueprintName = "SpeedyTorrentApp"
+               ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
          <BuildActionEntry
@@ -32,7 +32,7 @@
                BlueprintIdentifier = "109EC75655E46771D9F1DE38"
                BuildableName = "TorrentEngineTests.xctest"
                BlueprintName = "TorrentEngineTests"
-               ReferencedContainer = "container:SwiftTorrent.xcodeproj">
+               ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
          <BuildActionEntry
@@ -46,7 +46,7 @@
                BlueprintIdentifier = "F62CBED7B6D3C92EB663CA87"
                BuildableName = "storrent"
                BlueprintName = "storrent"
-               ReferencedContainer = "container:SwiftTorrent.xcodeproj">
+               ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -61,9 +61,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "4F1545B8FC53E321B1E70467"
-            BuildableName = "SwiftTorrentApp.app"
-            BlueprintName = "SwiftTorrentApp"
-            ReferencedContainer = "container:SwiftTorrent.xcodeproj">
+            BuildableName = "SpeedyTorrentApp.app"
+            BlueprintName = "SpeedyTorrentApp"
+            ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
       <Testables>
@@ -75,7 +75,7 @@
                BlueprintIdentifier = "109EC75655E46771D9F1DE38"
                BuildableName = "TorrentEngineTests.xctest"
                BlueprintName = "TorrentEngineTests"
-               ReferencedContainer = "container:SwiftTorrent.xcodeproj">
+               ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -97,9 +97,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "4F1545B8FC53E321B1E70467"
-            BuildableName = "SwiftTorrentApp.app"
-            BlueprintName = "SwiftTorrentApp"
-            ReferencedContainer = "container:SwiftTorrent.xcodeproj">
+            BuildableName = "SpeedyTorrentApp.app"
+            BlueprintName = "SpeedyTorrentApp"
+            ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
       <CommandLineArguments>
@@ -116,9 +116,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "4F1545B8FC53E321B1E70467"
-            BuildableName = "SwiftTorrentApp.app"
-            BlueprintName = "SwiftTorrentApp"
-            ReferencedContainer = "container:SwiftTorrent.xcodeproj">
+            BuildableName = "SpeedyTorrentApp.app"
+            BlueprintName = "SpeedyTorrentApp"
+            ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

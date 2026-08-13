@@ -1,6 +1,6 @@
-# XcodeGen spec for SwiftTorrent. Regenerate the project with:  xcodegen generate
+# XcodeGen spec for SpeedyTorrent. Regenerate the project with:  xcodegen generate
 # The generated .xcodeproj is committed; this file is the source of truth.
-name: SwiftTorrent
+name: SpeedyTorrent
 options:
   bundleIdPrefix: dev.nwf
   deploymentTarget:
@@ -32,23 +32,23 @@ targets:
         ENABLE_TESTABILITY: "YES"
 
   # The SwiftUI macOS app.
-  SwiftTorrentApp:
+  SpeedyTorrentApp:
     type: application
     platform: macOS
     sources:
-      - Sources/SwiftTorrentApp
+      - Sources/SpeedyTorrentApp
       - path: Resources/AppIcon.icns
         buildPhase: resources
     dependencies:
       - target: TorrentEngine
     settings:
       base:
-        PRODUCT_NAME: SwiftTorrent
-        PRODUCT_BUNDLE_IDENTIFIER: dev.nwf.SwiftTorrent
+        PRODUCT_NAME: SpeedyTorrent
+        PRODUCT_BUNDLE_IDENTIFIER: dev.nwf.SpeedyTorrent
     info:
-      path: SwiftTorrent-Info.plist
+      path: SpeedyTorrent-Info.plist
       properties:
-        CFBundleDisplayName: SwiftTorrent
+        CFBundleDisplayName: SpeedyTorrent
         CFBundleShortVersionString: "0.1.0"
         CFBundleVersion: "0.1.0"
         CFBundleIconFile: AppIcon
@@ -98,10 +98,10 @@ targets:
         GENERATE_INFOPLIST_FILE: "YES"
 
 schemes:
-  SwiftTorrent:
+  SpeedyTorrent:
     build:
       targets:
-        SwiftTorrentApp: all
+        SpeedyTorrentApp: all
         storrent: all
         TorrentEngineTests: [test]
     run:

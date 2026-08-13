@@ -8,7 +8,7 @@ enum ExtensionHandshake {
     static func encode(metadataSize: Int?, listenPort: UInt16?) -> Data {
         var pairs: [(String, BValue)] = [
             ("m", .dictionary([("ut_metadata", .integer(Int(utMetadataID)))])),
-            ("v", .string("SwiftTorrent \(TorrentEngineInfo.version)")),
+            ("v", .string("SpeedyTorrent \(TorrentEngineInfo.version)")),
         ]
         if let metadataSize {
             pairs.append(("metadata_size", .integer(metadataSize)))

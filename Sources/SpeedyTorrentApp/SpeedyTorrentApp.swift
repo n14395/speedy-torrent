@@ -2,7 +2,7 @@ import SwiftUI
 import TorrentEngine
 
 @main
-struct SwiftTorrentApp: App {
+struct SpeedyTorrentApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var store = SessionStore()
 
@@ -17,7 +17,7 @@ struct SwiftTorrentApp: App {
     }
 
     var body: some Scene {
-        Window("SwiftTorrent", id: "main") {
+        Window("SpeedyTorrent", id: "main") {
             TorrentListView()
                 .environment(store)
                 .frame(minWidth: 720, minHeight: 360)

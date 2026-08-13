@@ -2,7 +2,7 @@ import Foundation
 import TorrentEngine
 
 let usage = """
-storrent — SwiftTorrent engine CLI harness
+storrent — SpeedyTorrent engine CLI harness
 
 Usage:
   storrent version

@@ -34,11 +34,11 @@ struct MenuBarView: View {
 
             Divider()
 
-            Button("Open SwiftTorrent") {
+            Button("Open SpeedyTorrent") {
                 openWindow(id: "main")
                 NSApplication.shared.activate()
             }
-            Button("Quit SwiftTorrent") {
+            Button("Quit SpeedyTorrent") {
                 NSApplication.shared.terminate(nil)
             }
         }

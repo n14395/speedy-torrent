@@ -2,12 +2,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "SwiftTorrent",
+    name: "SpeedyTorrent",
     platforms: [.macOS(.v15)],
     targets: [
         .target(name: "TorrentEngine"),
         .executableTarget(
-            name: "SwiftTorrentApp",
+            name: "SpeedyTorrentApp",
             dependencies: ["TorrentEngine"]
         ),
         .executableTarget(

@@ -27,7 +27,7 @@ struct TorrentListView: View {
             }
         }
         .toolbar { toolbarContent }
-        .navigationTitle("SwiftTorrent")
+        .navigationTitle("SpeedyTorrent")
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: [UTType(filenameExtension: "torrent") ?? .data],

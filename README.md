@@ -1,4 +1,4 @@
-# SwiftTorrent
+# SpeedyTorrent
 
 A simple, reliable BitTorrent client for macOS, written entirely in Swift — the
 protocol engine has zero third-party dependencies.
@@ -31,7 +31,7 @@ protocol engine has zero third-party dependencies.
 | Path | What it is |
 |---|---|
 | `Sources/TorrentEngine` | The engine library: bencode, metainfo, trackers, peer wire, pieces, storage, DHT, session |
-| `Sources/SwiftTorrentApp` | SwiftUI app (window + menu bar + settings) |
+| `Sources/SpeedyTorrentApp` | SwiftUI app (window + menu bar + settings) |
 | `Sources/storrent` | CLI harness (`info`, `create`, `announce`, `download`, `seed`, `magnet`, `dht`) |
 | `Tests/TorrentEngineTests` | Unit tests + loopback end-to-end suites |
 | `Scripts/` | build/test/bundle helpers |
@@ -40,7 +40,7 @@ protocol engine has zero third-party dependencies.
 
 Requires macOS 15+ and a Swift 6 toolchain. Two equivalent ways to build:
 
-**Xcode** — open `SwiftTorrent.xcodeproj`, then build/run the **SwiftTorrent**
+**Xcode** — open `SpeedyTorrent.xcodeproj`, then build/run the **SpeedyTorrent**
 scheme (targets: the app, the `storrent` CLI, `TorrentEngine`, and tests). The
 project is generated from `project.yml` with [XcodeGen](https://github.com/yonaskolb/XcodeGen);
 after editing `project.yml`, run `xcodegen generate` to refresh it.
@@ -49,7 +49,7 @@ after editing `project.yml`, run `xcodegen generate` to refresh it.
 
 ```sh
 Scripts/test.sh        # run the full test suite
-Scripts/bundle.sh      # build dist/SwiftTorrent.app (release, ad-hoc signed)
+Scripts/bundle.sh      # build dist/SpeedyTorrent.app (release, ad-hoc signed)
 ```
 
 The scripts prefer a full Xcode install (`/Applications/Xcode[-beta].app`),

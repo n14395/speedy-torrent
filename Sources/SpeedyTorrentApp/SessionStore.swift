@@ -75,7 +75,7 @@ final class SessionStore {
         let downKiB = defaults.integer(forKey: Defaults.downloadRateLimitKiB)
         let upKiB = defaults.integer(forKey: Defaults.uploadRateLimitKiB)
         let stateDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first?.appendingPathComponent("SwiftTorrent", isDirectory: true)
+            .first?.appendingPathComponent("SpeedyTorrent", isDirectory: true)
 
         let configuration = TorrentSession.Configuration(
             downloadDirectory: URL(fileURLWithPath: defaults.string(forKey: Defaults.downloadDirectory) ?? "~/Downloads"),
