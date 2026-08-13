@@ -115,3 +115,32 @@ PLIST
 
 codesign --force --sign - "$APP"
 echo "Built $APP"
+
+# Package a distributable .dmg alongside the .app (set SKIP_DMG=1 to skip).
+if [[ "${SKIP_DMG:-0}" != "1" ]]; then
+  DMG="$OUT/SpeedyTorrent-$VERSION.dmg"
+  STAGE="$(mktemp -d)"
+  trap 'rm -rf "$STAGE"' EXIT
+
+  # ditto preserves the code signature and resource attributes; the
+  # /Applications symlink gives the familiar drag-to-install layout.
+  ditto "$APP" "$STAGE/SpeedyTorrent.app"
+  ln -s /Applications "$STAGE/Applications"
+
+  rm -f "$DMG"
+  hdiutil create \
+    -volname "SpeedyTorrent $VERSION" \
+    -srcfolder "$STAGE" \
+    -fs HFS+ \
+    -format UDZO \
+    -ov \
+    "$DMG" >/dev/null
+
+  rm -rf "$STAGE"
+  trap - EXIT
+  echo "Built $DMG"
+  echo
+  echo "Note: the app is ad-hoc signed (not notarized). On first launch after"
+  echo "downloading, macOS Gatekeeper will block it — right-click the app and"
+  echo "choose Open, or run: xattr -dr com.apple.quarantine /Applications/SpeedyTorrent.app"
+fi
