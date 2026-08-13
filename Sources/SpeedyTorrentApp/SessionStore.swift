@@ -35,10 +35,20 @@ struct PendingTorrentAdd: Identifiable, Equatable {
 
     let id = UUID()
     let source: Source
-    let displayName: String
-    let totalSize: Int64?
-    /// The torrent's files (empty for magnets — unknown until metadata arrives).
-    let files: [FileEntry]
+    let infoHash: InfoHash
+    /// Metadata shown in the sheet. For magnets these start as placeholders and
+    /// are filled in live once the background prefetch resolves.
+    var displayName: String
+    var totalSize: Int64?
+    /// The torrent's files (empty for magnets until metadata arrives).
+    var files: [FileEntry]
+    /// True once a magnet's metadata has arrived (always true for .torrent).
+    var metadataResolved: Bool
+
+    var isMagnet: Bool {
+        if case .magnet = source { return true }
+        return false
+    }
 }
 
 /// Main-actor bridge between the engine session and SwiftUI.
@@ -108,8 +118,23 @@ final class SessionStore {
                 let snaps = await session.snapshots()
                 self.noticeCompletions(snaps)
                 self.snapshots = snaps
+                await self.refreshPendingMetadata(session)
                 try? await Task.sleep(for: .seconds(1))
             }
+        }
+    }
+
+    /// Fills in a magnet's metadata (name/size/files) on its pending-add row
+    /// once the background prefetch resolves, so an open add sheet updates live.
+    private func refreshPendingMetadata(_ session: TorrentSession) async {
+        for pending in pendingAdds where pending.isMagnet && !pending.metadataResolved {
+            guard let meta = await session.prefetchedMetadata(for: pending.infoHash),
+                  let index = pendingAdds.firstIndex(where: { $0.id == pending.id })
+            else { continue }
+            pendingAdds[index].displayName = meta.name
+            pendingAdds[index].totalSize = meta.totalLength
+            pendingAdds[index].files = meta.files
+            pendingAdds[index].metadataResolved = true
         }
     }
 
@@ -150,33 +175,49 @@ final class SessionStore {
             }
             pendingAdds.append(PendingTorrentAdd(
                 source: .torrentFile(data: data),
+                infoHash: meta.info.infoHash,
                 displayName: meta.info.name,
                 totalSize: meta.info.totalLength,
-                files: meta.info.files
+                files: meta.info.files,
+                metadataResolved: true
             ))
         } catch {
             lastActionError = "Could not read torrent file: \(friendly(error))"
         }
     }
 
-    /// Queues a magnet link; the settings sheet confirms the actual add.
+    /// Queues a magnet link and immediately begins fetching its metadata in the
+    /// background, so the add sheet can fill in the file list before the user
+    /// confirms. The settings sheet confirms the actual add.
     func addMagnet(_ string: String) {
         guard let magnet = MagnetLink(string: string) else {
             lastActionError = "Could not add magnet: that is not a valid magnet link."
             return
         }
         guard !isKnown(magnet.infoHash),
-              !pendingAdds.contains(where: { $0.source == .magnet(uri: string) })
+              !pendingAdds.contains(where: { $0.infoHash == magnet.infoHash })
         else {
             lastActionError = "Could not add magnet: it is already added."
             return
         }
         pendingAdds.append(PendingTorrentAdd(
             source: .magnet(uri: string),
+            infoHash: magnet.infoHash,
             displayName: magnet.displayName ?? magnet.infoHash.hexString,
             totalSize: nil,
-            files: []
+            files: [],
+            metadataResolved: false
         ))
+        let id = pendingAdds.last!.id
+        run("start fetching metadata") { [weak self] session in
+            do {
+                _ = try await session.beginMetadataPrefetch(string)
+            } catch {
+                // Most likely a race where it became known; drop the pending row.
+                await MainActor.run { self?.pendingAdds.removeAll { $0.id == id } }
+                throw error
+            }
+        }
     }
 
     private func isKnown(_ infoHash: InfoHash) -> Bool {
@@ -191,8 +232,12 @@ final class SessionStore {
     ) {
         guard let index = pendingAdds.firstIndex(where: { $0.id == id }) else { return }
         let pending = pendingAdds.remove(at: index)
-        // A full selection is stored as nil (the default).
-        let wanted = wantedFiles.flatMap { $0.count == pending.files.count ? nil : $0 }
+        // A full selection is stored as nil (the default). File selection only
+        // applies once files are known (immediately for .torrent, after
+        // metadata for magnets).
+        let wanted = pending.files.isEmpty
+            ? nil
+            : wantedFiles.flatMap { $0.count == pending.files.count ? nil : $0 }
         run("add torrent") { session in
             switch pending.source {
             case .torrentFile(let data):
@@ -202,9 +247,12 @@ final class SessionStore {
                     sequential: sequential,
                     wantedFiles: wanted
                 )
-            case .magnet(let uri):
-                _ = try await session.addMagnet(
-                    uri, downloadDirectory: directory, sequential: sequential
+            case .magnet:
+                _ = try await session.commitMagnet(
+                    pending.infoHash,
+                    downloadDirectory: directory,
+                    sequential: sequential,
+                    wantedFiles: wanted
                 )
             }
         }
@@ -220,7 +268,12 @@ final class SessionStore {
     }
 
     func dismissPendingAdd(id: PendingTorrentAdd.ID) {
-        pendingAdds.removeAll { $0.id == id }
+        guard let index = pendingAdds.firstIndex(where: { $0.id == id }) else { return }
+        let pending = pendingAdds.remove(at: index)
+        // Abandon the background metadata fetch started for a magnet.
+        if pending.isMagnet {
+            run("cancel metadata fetch") { await $0.cancelMetadataPrefetch(pending.infoHash) }
+        }
     }
 
     /// Handles both magnet: URLs and .torrent file URLs (dock/Finder opens).

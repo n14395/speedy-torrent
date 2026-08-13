@@ -5,12 +5,15 @@ import CryptoKit
 /// peers via ut_metadata (BEP 9). Once resolved, the session replaces this
 /// with a real TorrentController.
 actor MagnetController {
-    let magnet: MagnetLink
+    nonisolated let magnet: MagnetLink
     private let sessionPeerID: Data
     private let listenPort: UInt16
     private let trackers: TrackerManager
     private let announceKey = UInt32.random(in: .min ... .max)
-    private let onResolved: @Sendable (Data) async -> Void
+    /// Called once metadata is verified. Absent while the magnet is only being
+    /// prefetched (see TorrentSession's metadata prefetch); set by `commit`
+    /// when the user turns a prefetch into a real download before it resolves.
+    private var onResolved: (@Sendable (Data) async -> Void)?
     /// Session-provided DHT lookup; polled until the magnet resolves.
     private let discoverPeers: (@Sendable () async -> [PeerAddress])?
     private var discovering = false
@@ -23,6 +26,8 @@ actor MagnetController {
     private var attemptedRecently: Set<PeerAddress> = []
     private var activeFetches = 0
     private var resolved = false
+    /// The verified raw info dictionary once resolved (held for prefetch/commit).
+    private var resolvedData: Data?
     private var stopped = false
     private var mainTask: Task<Void, Never>?
     private let addedAt = Date().timeIntervalSince1970
@@ -34,7 +39,7 @@ actor MagnetController {
         downloadDirectory: URL,
         sequential: Bool,
         discoverPeers: (@Sendable () async -> [PeerAddress])? = nil,
-        onResolved: @escaping @Sendable (Data) async -> Void
+        onResolved: (@Sendable (Data) async -> Void)? = nil
     ) {
         self.magnet = magnet
         self.sessionPeerID = sessionPeerID
@@ -237,6 +242,32 @@ actor MagnetController {
     private func deliver(_ infoData: Data) async {
         guard !resolved else { return }
         resolved = true
-        await onResolved(infoData)
+        resolvedData = infoData
+        if let onResolved {
+            await onResolved(infoData)
+        }
+    }
+
+    /// The verified raw info dictionary, or nil while metadata is still being
+    /// fetched. Used by prefetch to populate the add sheet before committing.
+    var resolvedInfoData: Data? { resolvedData }
+
+    enum CommitOutcome: Sendable {
+        /// Metadata already arrived; caller builds the torrent from this data.
+        case resolved(Data)
+        /// Still fetching; `convert` has been armed and will fire on resolve.
+        case pending
+    }
+
+    /// Turns a prefetch into a committed download. If metadata already arrived
+    /// it is returned so the session can build the torrent immediately;
+    /// otherwise the resolve callback is armed so the in-flight fetch converts
+    /// itself once it completes. Atomic with `deliver` (both actor-isolated).
+    func commit(onResolve convert: @escaping @Sendable (Data) async -> Void) -> CommitOutcome {
+        if let resolvedData {
+            return .resolved(resolvedData)
+        }
+        onResolved = convert
+        return .pending
     }
 }

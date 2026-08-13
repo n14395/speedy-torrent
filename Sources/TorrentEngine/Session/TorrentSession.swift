@@ -50,6 +50,10 @@ public actor TorrentSession {
     private var configuration: Configuration
     private var controllers: [InfoHash: TorrentController] = [:]
     private var magnets: [InfoHash: MagnetController] = [:]
+    /// Magnets whose metadata is being fetched *before* the user has confirmed
+    /// the add. Kept out of `order`/`snapshots()` so they don't appear in the
+    /// torrent list, and never touch disk until committed.
+    private var prefetches: [InfoHash: MagnetController] = [:]
     private var order: [InfoHash] = []
     private var listener: NWListener?
     private let persistence: PersistenceStore?
@@ -164,15 +168,7 @@ public actor TorrentSession {
         guard controllers[magnet.infoHash] == nil, magnets[magnet.infoHash] == nil else {
             throw SessionError.duplicateTorrent
         }
-        let discover: (@Sendable () async -> [PeerAddress])?
-        if configuration.enableDHT {
-            let dht = dht
-            let port = configuration.listenPort
-            let hash = magnet.infoHash
-            discover = { await dht.findPeers(infoHash: hash, announcePort: port) }
-        } else {
-            discover = nil
-        }
+        let discover = makeDiscoverClosure(for: magnet.infoHash)
         let controller = MagnetController(
             magnet: magnet,
             sessionPeerID: peerID,
@@ -214,6 +210,129 @@ public actor TorrentSession {
         ) else { return }
         if let controller = controllers[hash] {
             await controller.addKnownPeers(Array(transferredPeers))
+        }
+    }
+
+    /// DHT peer-discovery closure for a magnet/torrent, or nil when DHT is off.
+    private func makeDiscoverClosure(
+        for infoHash: InfoHash
+    ) -> (@Sendable () async -> [PeerAddress])? {
+        guard configuration.enableDHT else { return nil }
+        let dht = dht
+        let port = configuration.listenPort
+        return { await dht.findPeers(infoHash: infoHash, announcePort: port) }
+    }
+
+    // MARK: - Magnet metadata prefetch
+
+    /// Resolved-but-not-yet-added magnet metadata, for the add sheet.
+    public struct PrefetchedMetadata: Sendable {
+        public let name: String
+        public let totalLength: Int64
+        public let files: [FileEntry]
+    }
+
+    /// Starts fetching a magnet's metadata *without* adding it as a download.
+    /// The torrent stays out of the list and off disk; call `commitMagnet` to
+    /// turn it into a real download, or `cancelMetadataPrefetch` to abandon it.
+    @discardableResult
+    public func beginMetadataPrefetch(_ magnetString: String) async throws -> InfoHash {
+        guard let magnet = MagnetLink(string: magnetString) else {
+            throw SessionError.invalidMagnet
+        }
+        guard controllers[magnet.infoHash] == nil,
+              magnets[magnet.infoHash] == nil,
+              prefetches[magnet.infoHash] == nil
+        else {
+            throw SessionError.duplicateTorrent
+        }
+        let controller = MagnetController(
+            magnet: magnet,
+            sessionPeerID: peerID,
+            listenPort: configuration.listenPort,
+            downloadDirectory: configuration.downloadDirectory,
+            sequential: configuration.sequentialDownload,
+            discoverPeers: makeDiscoverClosure(for: magnet.infoHash)
+        )
+        prefetches[magnet.infoHash] = controller
+        await controller.start()
+        return magnet.infoHash
+    }
+
+    /// A prefetch's metadata once it has resolved (nil while still fetching, or
+    /// if there is no such prefetch).
+    public func prefetchedMetadata(for infoHash: InfoHash) async -> PrefetchedMetadata? {
+        guard let controller = prefetches[infoHash],
+              let data = await controller.resolvedInfoData,
+              let info = try? TorrentInfo(bencodedData: data)
+        else { return nil }
+        return PrefetchedMetadata(
+            name: info.name, totalLength: info.totalLength, files: info.files
+        )
+    }
+
+    /// Abandons a metadata prefetch (nothing was added or written).
+    public func cancelMetadataPrefetch(_ infoHash: InfoHash) async {
+        guard let controller = prefetches.removeValue(forKey: infoHash) else { return }
+        await controller.stop()
+    }
+
+    /// Turns a metadata prefetch into a real download. If metadata already
+    /// arrived the torrent is built immediately with the chosen selection;
+    /// otherwise the in-flight fetch is promoted to a committed magnet that
+    /// converts itself on resolve (ignoring `wantedFiles`, since files are
+    /// unknown until then).
+    @discardableResult
+    public func commitMagnet(
+        _ infoHash: InfoHash,
+        downloadDirectory: URL? = nil,
+        sequential: Bool? = nil,
+        wantedFiles: Set<Int>? = nil
+    ) async throws -> InfoHash {
+        guard let controller = prefetches.removeValue(forKey: infoHash) else {
+            throw SessionError.unknownTorrent
+        }
+        let magnet = controller.magnet
+        let directory = downloadDirectory ?? configuration.downloadDirectory
+        let wantSequential = sequential ?? configuration.sequentialDownload
+        await controller.setDownloadDirectory(directory)
+        await controller.setSequential(wantSequential)
+
+        let outcome = await controller.commit { [weak self] infoData in
+            await self?.metadataResolved(magnet: magnet, infoData: infoData)
+        }
+        switch outcome {
+        case .resolved(let infoData):
+            let peers = await controller.knownPeers
+            await controller.stop()
+            guard let info = try? TorrentInfo(bencodedData: infoData) else {
+                throw SessionError.invalidMagnet
+            }
+            let tiers = magnet.trackers.map { [$0] }
+            let assembled = TorrentMetaInfo.assembleTorrentData(
+                infoDictData: infoData, announceTiers: tiers
+            )
+            // A full selection is stored as nil (download everything).
+            let wanted = wantedFiles.flatMap { $0.count == info.files.count ? nil : $0 }
+            let hash = try await addTorrent(
+                info: info,
+                announceTiers: tiers,
+                downloadDirectory: directory,
+                sequential: wantSequential,
+                wantedFiles: wanted,
+                resume: nil,
+                persistTorrentData: assembled
+            )
+            if let added = controllers[hash] {
+                await added.addKnownPeers(Array(peers))
+            }
+            return hash
+        case .pending:
+            // Metadata not in yet: keep the same controller running as a normal
+            // committed magnet so no peers/progress are lost.
+            magnets[infoHash] = controller
+            order.append(infoHash)
+            return infoHash
         }
     }
 
@@ -308,6 +427,8 @@ public actor TorrentSession {
             await controller.addKnownPeers(addresses)
         } else if let magnet = magnets[infoHash] {
             await magnet.addKnownPeers(addresses)
+        } else if let prefetch = prefetches[infoHash] {
+            await prefetch.addKnownPeers(addresses)
         } else {
             throw SessionError.unknownTorrent
         }
@@ -351,6 +472,10 @@ public actor TorrentSession {
             await magnet.stop()
         }
         magnets.removeAll()
+        for prefetch in prefetches.values {
+            await prefetch.stop()
+        }
+        prefetches.removeAll()
         for controller in controllers.values {
             await controller.stop()
         }

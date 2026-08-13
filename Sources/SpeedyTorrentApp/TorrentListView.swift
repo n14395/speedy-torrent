@@ -209,7 +209,6 @@ struct TorrentListView: View {
             .help("Open a .torrent file")
 
             Button {
-                magnetText = pasteboardMagnet() ?? ""
                 showingMagnetSheet = true
             } label: {
                 Label("Add Magnet", systemImage: "link.badge.plus")
@@ -285,6 +284,13 @@ struct TorrentListView: View {
             }
         }
         .padding(20)
+        // Auto-fill a magnet link sitting on the clipboard so the common case
+        // (copy a magnet, open the app) is one click.
+        .onAppear {
+            if magnetText.isEmpty, let clipboard = pasteboardMagnet() {
+                magnetText = clipboard
+            }
+        }
     }
 
     private func submitMagnet() {
