@@ -51,20 +51,44 @@ struct PersistenceStore: Sendable {
         try? FileManager.default.removeItem(at: directory(for: infoHash))
     }
 
+    /// Persists the list order (= queue priority) as hex hashes.
+    func saveQueueOrder(_ hexHashes: [String]) {
+        if let encoded = try? JSONEncoder().encode(hexHashes) {
+            try? encoded.write(to: baseURL.appendingPathComponent("queue.json"))
+        }
+    }
+
+    func loadQueueOrder() -> [String] {
+        (try? Data(contentsOf: baseURL.appendingPathComponent("queue.json")))
+            .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
+    }
+
+    /// Entries ordered by the saved queue order; unknown ones follow by
+    /// added-date.
     func loadAll() -> [(torrentData: Data, resume: ResumeData?)] {
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: baseURL, includingPropertiesForKeys: nil
         ) else { return [] }
-        var results: [(Data, ResumeData?, Double)] = []
-        for entry in entries {
+        let queueIndex = Dictionary(
+            uniqueKeysWithValues: loadQueueOrder().enumerated().map { ($1, $0) }
+        )
+        var results: [(Data, ResumeData?, Int, Double)] = []
+        for entry in entries where entry.hasDirectoryPath {
             guard let torrentData = try? Data(contentsOf: entry.appendingPathComponent("meta.torrent")) else {
                 continue
             }
             let resume = (try? Data(contentsOf: entry.appendingPathComponent("resume.json")))
                 .flatMap { try? JSONDecoder().decode(ResumeData.self, from: $0) }
-            results.append((torrentData, resume, resume?.addedAt ?? 0))
+            results.append((
+                torrentData,
+                resume,
+                queueIndex[entry.lastPathComponent] ?? .max,
+                resume?.addedAt ?? 0
+            ))
         }
-        return results.sorted { $0.2 < $1.2 }.map { ($0.0, $0.1) }
+        return results
+            .sorted { ($0.2, $0.3) < ($1.2, $1.3) }
+            .map { ($0.0, $0.1) }
     }
 }
 

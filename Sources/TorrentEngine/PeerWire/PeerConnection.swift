@@ -24,6 +24,14 @@ actor PeerConnection {
     private var downloadLimiter: RateLimiter?
     private var uploadLimiter: RateLimiter?
 
+    /// MSE/PE stream ciphers, installed once the encrypted handshake completes.
+    /// While nil, the wire is plaintext (and the MSE handshake reads/writes raw
+    /// bytes, applying its own transient ciphers).
+    private var rc4Send: RC4?
+    private var rc4Receive: RC4?
+    /// True once an MSE handshake negotiated RC4 for this connection.
+    private(set) var isEncrypted = false
+
     func setLimiters(download: RateLimiter?, upload: RateLimiter?) {
         downloadLimiter = download
         uploadLimiter = upload
@@ -105,7 +113,10 @@ actor PeerConnection {
 
     private func handleReceive(data: Data?, isComplete: Bool, error: NWError?) {
         if let data, !data.isEmpty {
-            receivedChunks.append(data)
+            // Post-handshake traffic arrives encrypted; decrypt as it lands so
+            // the buffer always holds plaintext.
+            let chunk = rc4Receive != nil ? rc4Receive!.process(data) : data
+            receivedChunks.append(chunk)
             bytesReceived += Int64(data.count)
         }
         if let error {
@@ -182,8 +193,9 @@ actor PeerConnection {
             await uploadLimiter.acquire(data.count)
         }
         bytesSent += Int64(data.count)
+        let payload = rc4Send != nil ? rc4Send!.process(data) : data
         return try await withCheckedThrowingContinuation { continuation in
-            connection.send(content: data, completion: .contentProcessed { error in
+            connection.send(content: payload, completion: .contentProcessed { error in
                 if let error {
                     continuation.resume(throwing: PeerWireError.network(error.localizedDescription))
                 } else {
@@ -191,6 +203,180 @@ actor PeerConnection {
                 }
             })
         }
+    }
+
+    // MARK: - MSE / PE encryption handshake
+
+    /// Installs the negotiated stream ciphers, decrypting any ciphertext that
+    /// already arrived after the handshake in the same TCP segment.
+    private func installCiphers(send: RC4, receive: RC4) {
+        var receive = receive
+        if !buffer.isEmpty { buffer = receive.process(buffer) }
+        for index in receivedChunks.indices {
+            receivedChunks[index] = receive.process(receivedChunks[index])
+        }
+        rc4Receive = receive
+        rc4Send = send
+        isEncrypted = true
+    }
+
+    private func randomPad() -> [UInt8] {
+        (0..<Int.random(in: 0...MSEHandshake.maxPad)).map { _ in UInt8.random(in: 0...255) }
+    }
+
+    /// Consumes bytes until `pattern` has just been read (used to skip the
+    /// random pre-handshake padding whose length is unknown).
+    private func syncToPattern(
+        _ pattern: [UInt8], maxSkip: Int, deadline: ContinuousClock.Instant
+    ) async throws {
+        var window: [UInt8] = []
+        var scanned = 0
+        while true {
+            let byte = try await receiveExactly(1, deadline: deadline)
+            window.append(byte[byte.startIndex])
+            if window.count > pattern.count { window.removeFirst() }
+            if window.count == pattern.count, window == pattern { return }
+            scanned += 1
+            if scanned > maxSkip + pattern.count {
+                throw PeerWireError.handshakeFailed("MSE: could not synchronize")
+            }
+        }
+    }
+
+    /// MSE/PE handshake as the connecting side. Returns true if RC4 was
+    /// negotiated (ciphers installed); false if plaintext was selected.
+    func mseInitiatorHandshake(infoHash: InfoHash, requireEncryption: Bool) async throws -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        let privateKey = MSEHandshake.randomPrivateKey()
+        let publicKey = MSEHandshake.publicKey(privateKey: privateKey)
+        try await sendRaw(Data(publicKey + randomPad()))
+
+        let yb = try await receiveExactly(MSEHandshake.keyLength, deadline: deadline)
+        let secret = MSEHandshake.sharedSecret(peerPublicKey: [UInt8](yb), privateKey: privateKey)
+        let skey = [UInt8](infoHash.data)
+        var encrypt = MSEHandshake.rc4Cipher(label: "keyA", secret: secret, skey: skey) // A→B
+        var decrypt = MSEHandshake.rc4Cipher(label: "keyB", secret: secret, skey: skey) // B→A
+
+        let cryptoProvide = requireEncryption
+            ? MSEHandshake.cryptoRC4
+            : (MSEHandshake.cryptoRC4 | MSEHandshake.cryptoPlaintext)
+        var plain = Data()
+        plain.append(contentsOf: MSEHandshake.vc)
+        plain.appendUInt32(cryptoProvide)
+        plain.appendUInt16(0) // len(PadC)
+        plain.appendUInt16(0) // len(IA)
+        var message = Data()
+        message.append(contentsOf: MSEHandshake.req1(secret: secret))
+        message.append(contentsOf: MSEHandshake.req2XorReq3(skey: skey, secret: secret))
+        message.append(encrypt.process(plain))
+        try await sendRaw(message)
+
+        // Sync on ENCRYPT(VC): since VC is zeros it equals decrypt's first 8
+        // keystream bytes (computed on a copy so `decrypt` stays put).
+        var probe = decrypt
+        let encryptedVC = [UInt8](probe.process(Data(MSEHandshake.vc)))
+        try await syncToPattern(
+            encryptedVC, maxSkip: MSEHandshake.keyLength + MSEHandshake.maxPad, deadline: deadline
+        )
+        _ = decrypt.process(Data(MSEHandshake.vc)) // advance past the VC we synced past
+
+        let selectPlain = decrypt.process(try await receiveExactly(6, deadline: deadline))
+        guard let cryptoSelect = selectPlain.readUInt32(at: 0),
+              let padDLen = selectPlain.readUInt16(at: 4)
+        else { throw PeerWireError.handshakeFailed("MSE: malformed select") }
+        if padDLen > 0 {
+            _ = decrypt.process(try await receiveExactly(Int(padDLen), deadline: deadline))
+        }
+
+        if cryptoSelect & MSEHandshake.cryptoRC4 != 0 {
+            installCiphers(send: encrypt, receive: decrypt)
+            return true
+        }
+        if !requireEncryption, cryptoSelect & MSEHandshake.cryptoPlaintext != 0 {
+            return false
+        }
+        throw PeerWireError.handshakeFailed("MSE: peer selected no supported method")
+    }
+
+    /// MSE/PE handshake as the accepting side. `prefix` is the bytes already
+    /// read while detecting the connection type (the start of the peer's DH
+    /// key). Returns the matched torrent and whether RC4 was negotiated.
+    func mseResponderHandshake(
+        prefix: Data, infoHashes: [InfoHash], allowPlaintext: Bool
+    ) async throws -> (infoHash: InfoHash, encrypted: Bool) {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        var ya = [UInt8](prefix)
+        if ya.count < MSEHandshake.keyLength {
+            ya += [UInt8](try await receiveExactly(MSEHandshake.keyLength - ya.count, deadline: deadline))
+        }
+        let privateKey = MSEHandshake.randomPrivateKey()
+        let publicKey = MSEHandshake.publicKey(privateKey: privateKey)
+        try await sendRaw(Data(publicKey + randomPad()))
+
+        let secret = MSEHandshake.sharedSecret(
+            peerPublicKey: Array(ya.prefix(MSEHandshake.keyLength)), privateKey: privateKey
+        )
+
+        // Skip PadA by syncing to the plaintext HASH('req1', S), then read the
+        // obfuscated SKEY marker and identify which torrent it names.
+        try await syncToPattern(
+            MSEHandshake.req1(secret: secret), maxSkip: MSEHandshake.maxPad, deadline: deadline
+        )
+        let obfuscated = [UInt8](try await receiveExactly(20, deadline: deadline))
+        let req2 = zip(obfuscated, MSEHandshake.req3(secret: secret)).map(^)
+        guard let infoHash = infoHashes.first(where: {
+            MSEHandshake.req2(skey: [UInt8]($0.data)) == req2
+        }) else {
+            throw PeerWireError.handshakeFailed("MSE: unknown torrent")
+        }
+        let skey = [UInt8](infoHash.data)
+        var decrypt = MSEHandshake.rc4Cipher(label: "keyA", secret: secret, skey: skey) // A→B
+        var encrypt = MSEHandshake.rc4Cipher(label: "keyB", secret: secret, skey: skey) // B→A
+
+        let vc = decrypt.process(try await receiveExactly(8, deadline: deadline))
+        guard [UInt8](vc) == MSEHandshake.vc else {
+            throw PeerWireError.handshakeFailed("MSE: bad verification constant")
+        }
+        let provide = decrypt.process(try await receiveExactly(6, deadline: deadline))
+        guard let cryptoProvide = provide.readUInt32(at: 0),
+              let padCLen = provide.readUInt16(at: 4)
+        else { throw PeerWireError.handshakeFailed("MSE: malformed provide") }
+        if padCLen > 0 {
+            _ = decrypt.process(try await receiveExactly(Int(padCLen), deadline: deadline))
+        }
+        let iaLen = Int(decrypt.process(try await receiveExactly(2, deadline: deadline)).readUInt16(at: 0) ?? 0)
+        var iaPlain = Data()
+        if iaLen > 0 {
+            iaPlain = decrypt.process(try await receiveExactly(iaLen, deadline: deadline))
+        }
+
+        let useRC4 = cryptoProvide & MSEHandshake.cryptoRC4 != 0
+        let cryptoSelect = useRC4
+            ? MSEHandshake.cryptoRC4
+            : (allowPlaintext && cryptoProvide & MSEHandshake.cryptoPlaintext != 0
+               ? MSEHandshake.cryptoPlaintext : 0)
+        guard cryptoSelect != 0 else {
+            throw PeerWireError.handshakeFailed("MSE: no common method")
+        }
+
+        var response = Data()
+        response.append(contentsOf: MSEHandshake.vc)
+        response.appendUInt32(cryptoSelect)
+        response.appendUInt16(0) // len(PadD)
+        try await sendRaw(encrypt.process(response))
+
+        if cryptoSelect == MSEHandshake.cryptoRC4 {
+            installCiphers(send: encrypt, receive: decrypt)
+        }
+        // Any initial payload the peer inlined precedes the following stream.
+        if !iaPlain.isEmpty { buffer = iaPlain + buffer }
+        return (infoHash, cryptoSelect == MSEHandshake.cryptoRC4)
+    }
+
+    /// Reads exactly `count` plaintext bytes (used by incoming-connection type
+    /// detection before any encryption is set up).
+    func receiveRawBytes(_ count: Int, timeout: Duration = .seconds(20)) async throws -> Data {
+        try await receiveExactly(count, deadline: .now.advanced(by: timeout))
     }
 
     // MARK: - Accounting

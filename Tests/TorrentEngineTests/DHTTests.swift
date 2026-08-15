@@ -151,6 +151,69 @@ import Testing
         let reject = try #require(UTMetadata.parse(UTMetadata.reject(piece: 0)))
         #expect(reject.type == .reject)
     }
+
+    @Test func handshakeCarriesPexIDAndListenPort() throws {
+        let encoded = ExtensionHandshake.encode(
+            metadataSize: nil, listenPort: 51413, pexID: ExtensionHandshake.utPexID
+        )
+        let parsed = try #require(ExtensionHandshake.parse(encoded))
+        #expect(parsed.utPexID == ExtensionHandshake.utPexID)
+        #expect(parsed.listenPort == 51413)
+
+        // Private torrents omit ut_pex.
+        let noPex = try #require(ExtensionHandshake.parse(
+            ExtensionHandshake.encode(metadataSize: nil, listenPort: 6881)
+        ))
+        #expect(noPex.utPexID == nil)
+    }
+
+    @Test func compactIPv4RoundTrips() {
+        let peers = [
+            PeerAddress(host: "1.2.3.4", port: 6881),
+            PeerAddress(host: "255.0.128.9", port: 51413),
+        ]
+        let decoded = CompactPeers.parseIPv4(CompactPeers.encodeIPv4(peers))
+        #expect(decoded == peers)
+        // IPv6 / malformed hosts are skipped by the IPv4 encoder.
+        let mixed = CompactPeers.encodeIPv4([
+            PeerAddress(host: "fe80::1", port: 6881),
+            PeerAddress(host: "10.0.0.1", port: 6881),
+        ])
+        #expect(CompactPeers.parseIPv4(mixed) == [PeerAddress(host: "10.0.0.1", port: 6881)])
+    }
+
+    @Test func pexMessageRoundTrips() {
+        let added = [PeerAddress(host: "1.1.1.1", port: 6881), PeerAddress(host: "2.2.2.2", port: 6882)]
+        let dropped = [PeerAddress(host: "3.3.3.3", port: 6883)]
+        let message = UTPex.encode(added: added, dropped: dropped)
+        #expect(UTPex.parseAdded(message) == added)
+    }
+}
+
+@Suite struct PortMapperTests {
+    @Test func natpmpMapRequestLayout() {
+        // 6881 = 0x1AE1, 7200s = 0x00001C20.
+        let request = NATPMP.mapRequest(internalPort: 6881, externalPort: 6881, lifetime: 7200)
+        #expect([UInt8](request) == [0, 2, 0, 0, 0x1A, 0xE1, 0x1A, 0xE1, 0x00, 0x00, 0x1C, 0x20])
+        // Lifetime 0 deletes the mapping; UDP uses opcode 1.
+        let delete = NATPMP.mapRequest(internalPort: 6881, externalPort: 6881, lifetime: 0, tcp: false)
+        #expect([UInt8](delete)[1] == 1)
+        #expect([UInt8](delete)[8...11] == [0, 0, 0, 0])
+    }
+
+    @Test func natpmpMapResponseParsing() throws {
+        // version 0, opcode 130, result 0, epoch, internal 6881, external 6882, lifetime 3600.
+        let response = Data([0, 130, 0, 0, 0, 0, 0, 0, 0x1A, 0xE1, 0x1A, 0xE2, 0x00, 0x00, 0x0E, 0x10])
+        let result = try #require(NATPMP.parseMapResponse(response))
+        #expect(result.resultCode == 0)
+        #expect(result.internalPort == 6881)
+        #expect(result.externalPort == 6882)
+        #expect(result.lifetime == 3600)
+
+        // Wrong opcode / short buffers are rejected.
+        #expect(NATPMP.parseMapResponse(Data([0, 129, 0, 0, 0, 0, 0, 0, 0x1A, 0xE1, 0x1A, 0xE2, 0, 0, 0, 0])) == nil)
+        #expect(NATPMP.parseMapResponse(Data([0, 130, 0, 0])) == nil)
+    }
 }
 
 @Suite struct MagnetLoopbackTests {
@@ -345,5 +408,70 @@ private struct MagnetTestEnv {
 
     func cleanup() {
         try? FileManager.default.removeItem(at: root)
+    }
+}
+
+@Suite struct PexLoopbackTests {
+    /// A hub connected to a seeder gossips that seeder's endpoint to a fresh
+    /// leecher over ut_pex; the leecher — which was told only about the hub —
+    /// then connects to the seeder directly.
+    @Test(.timeLimit(.minutes(1)))
+    func peerExchangePropagatesPeers() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pex-\(UUID().uuidString)")
+        let seedDir = root.appendingPathComponent("seed")
+        let hubDir = root.appendingPathComponent("hub")
+        let leechDir = root.appendingPathComponent("leech")
+        let content = seedDir.appendingPathComponent("payload")
+        try FileManager.default.createDirectory(at: content, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: hubDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: leechDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var gen = SystemRandomNumberGenerator()
+        let payload = Data((0..<200_000).map { _ in UInt8.random(in: 0...255, using: &gen) })
+        try payload.write(to: content.appendingPathComponent("file.bin"))
+        let torrentData = try TorrentBuilder.makeTorrentData(contentsOf: content, pieceLength: 32 * 1024)
+
+        func makeSession(_ dir: URL, port: UInt16) -> TorrentSession {
+            TorrentSession(configuration: .init(
+                downloadDirectory: dir, listenPort: port, enableDHT: false, pexIntervalSeconds: 1
+            ))
+        }
+
+        let seedPort = UInt16.random(in: 20000...40000)
+        let hubPort = UInt16.random(in: 40001...60000)
+
+        let seeder = makeSession(seedDir, port: seedPort)
+        _ = try await seeder.startListening()
+        let hash = try await seeder.addTorrent(fileData: torrentData)
+
+        // The hub knows only the seeder, and dials it (so it learns the
+        // seeder's real listening endpoint to gossip).
+        let hub = makeSession(hubDir, port: hubPort)
+        _ = try await hub.startListening()
+        _ = try await hub.addTorrent(fileData: torrentData)
+        try await hub.addPeers([PeerAddress(host: "127.0.0.1", port: seedPort)], to: hash)
+
+        // The leecher knows only the hub — no listener needed.
+        let leecher = makeSession(leechDir, port: 0)
+        _ = try await leecher.addTorrent(fileData: torrentData)
+        try await leecher.addPeers([PeerAddress(host: "127.0.0.1", port: hubPort)], to: hash)
+
+        // Without PEX the leecher could only ever reach the hub (1 peer);
+        // reaching 2 proves it discovered the seeder via gossip.
+        var discoveredViaPex = false
+        for _ in 0..<600 {
+            try await Task.sleep(for: .milliseconds(100))
+            if let snap = await leecher.snapshots().first, snap.peerCount >= 2 {
+                discoveredViaPex = true
+                break
+            }
+        }
+        #expect(discoveredViaPex)
+
+        await leecher.shutdown()
+        await hub.shutdown()
+        await seeder.shutdown()
     }
 }

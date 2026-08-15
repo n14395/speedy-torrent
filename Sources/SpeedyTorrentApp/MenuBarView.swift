@@ -105,10 +105,13 @@ struct MenuBarLabel: View {
     @ViewBuilder
     private var label: some View {
         if store.totalDownloadRate >= 1024 || store.totalUploadRate >= 1024 {
-            Text("↓\(shortRate(store.totalDownloadRate)) ↑\(shortRate(store.totalUploadRate))")
-                .monospacedDigit()
+            HStack(spacing: 3) {
+                Image(nsImage: Self.magnetIcon)
+                Text("↓\(shortRate(store.totalDownloadRate)) ↑\(shortRate(store.totalUploadRate))")
+                    .monospacedDigit()
+            }
         } else {
-            Image(systemName: "arrow.up.arrow.down.circle")
+            Image(nsImage: Self.magnetIcon)
         }
     }
 
@@ -118,4 +121,46 @@ struct MenuBarLabel: View {
         }
         return String(format: "%.0fK", rate / 1024)
     }
+
+    /// A template rendering of the app icon's magnet (arch, legs down,
+    /// separated pole tips), sized for the menu bar.
+    static let magnetIcon: NSImage = {
+        let size: CGFloat = 18
+        let image = NSImage(size: NSSize(width: size, height: size), flipped: true) { _ in
+            // The app icon's magnet geometry (SVG coords: x 272–752, y 210–760).
+            let s = (size * 0.86) / 550.0
+            let ox = (size - 480 * s) / 2 - 272 * s
+            let oy = (size - 550 * s) / 2 - 210 * s
+            func pt(_ x: CGFloat, _ y: CGFloat) -> NSPoint { NSPoint(x: ox + x * s, y: oy + y * s) }
+
+            let path = NSBezierPath()
+            path.move(to: pt(272, 450))
+            path.appendArc(withCenter: pt(512, 450), radius: 240 * s, startAngle: 180, endAngle: 360, clockwise: false)
+            path.line(to: pt(752, 760))
+            path.line(to: pt(632, 760))
+            path.line(to: pt(632, 450))
+            path.appendArc(withCenter: pt(512, 450), radius: 120 * s, startAngle: 360, endAngle: 180, clockwise: true)
+            path.line(to: pt(392, 760))
+            path.line(to: pt(272, 760))
+            path.close()
+            NSColor.black.setFill()
+            path.fill()
+
+            // Punch a thin gap above the pole tips (classic magnet look).
+            if let cg = NSGraphicsContext.current?.cgContext {
+                cg.setBlendMode(.clear)
+                let gapTop: CGFloat = 655, gapBottom: CGFloat = 691
+                for legX: CGFloat in [260, 620] {
+                    cg.fill(CGRect(
+                        x: pt(legX, gapTop).x, y: pt(legX, gapTop).y,
+                        width: 144 * s, height: (gapBottom - gapTop) * s
+                    ))
+                }
+                cg.setBlendMode(.normal)
+            }
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
 }

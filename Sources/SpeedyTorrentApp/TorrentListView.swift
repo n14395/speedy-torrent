@@ -2,6 +2,33 @@ import SwiftUI
 import UniformTypeIdentifiers
 import TorrentEngine
 
+/// Sort keys for optional/enum snapshot fields (Table needs Comparable values).
+extension TorrentSnapshot {
+    var statusSortKey: String { state.displayName }
+    var etaSortKey: Double { eta ?? .infinity }
+}
+
+/// The status-bar filter over the torrent list.
+enum StatusFilter: String, CaseIterable, Identifiable {
+    case all = "All"
+    case downloading = "Downloading"
+    case seeding = "Seeding"
+    case paused = "Paused"
+    case queued = "Queued"
+    var id: String { rawValue }
+
+    func matches(_ snapshot: TorrentSnapshot) -> Bool {
+        switch self {
+        case .all: true
+        case .downloading: snapshot.state == .downloading || snapshot.state == .fetchingMetadata
+            || snapshot.state == .checking || snapshot.state == .moving
+        case .seeding: snapshot.state == .seeding
+        case .paused: snapshot.state == .paused || snapshot.state == .failed
+        case .queued: snapshot.state == .queued
+        }
+    }
+}
+
 struct TorrentListView: View {
     @Environment(SessionStore.self) private var store
     @State private var selection: Set<InfoHash> = []
@@ -10,6 +37,25 @@ struct TorrentListView: View {
     @State private var magnetText = ""
     @State private var pendingRemoval: [TorrentSnapshot] = []
     @State private var editingTorrent: TorrentSnapshot?
+    @State private var showInspector = false
+    @State private var sortOrder: [KeyPathComparator<TorrentSnapshot>] = []
+    @State private var searchText = ""
+    @State private var statusFilter: StatusFilter = .all
+    /// Bumped once after launch to re-create toolbar buttons (see workaround).
+    @State private var toolbarRefresh = 0
+
+    /// Snapshots after search + status filter + column sort. An empty
+    /// `sortOrder` keeps the engine's manual (queue) order.
+    private var displayedSnapshots: [TorrentSnapshot] {
+        var rows = store.snapshots.filter { statusFilter.matches($0) }
+        if !searchText.isEmpty {
+            rows = rows.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        }
+        if !sortOrder.isEmpty {
+            rows.sort(using: sortOrder)
+        }
+        return rows
+    }
 
     var body: some View {
         Group {
@@ -24,10 +70,38 @@ struct TorrentListView: View {
                 }
             } else {
                 table
+                    .overlay {
+                        if displayedSnapshots.isEmpty {
+                            ContentUnavailableView.search
+                        }
+                    }
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !store.snapshots.isEmpty {
+                statusBar
             }
         }
         .toolbar { toolbarContent }
         .navigationTitle("SpeedyTorrent")
+        // Workaround: toolbar buttons render with a stale dimmed appearance on
+        // first launch until an event (e.g. mouse-over) refreshes them.
+        // Detaching and re-attaching the toolbar forces AppKit to rebuild the
+        // item views against the current (active) state.
+        .task {
+            try? await Task.sleep(for: .milliseconds(450))
+            for window in NSApplication.shared.windows {
+                guard let toolbar = window.toolbar else { continue }
+                window.toolbar = nil
+                window.toolbar = toolbar
+            }
+            toolbarRefresh += 1
+        }
+        .inspector(isPresented: $showInspector) {
+            InspectorPane(selection: selection)
+                .environment(store)
+                .inspectorColumnWidth(min: 300, ideal: 420, max: 600)
+        }
         .fileImporter(
             isPresented: $showingFileImporter,
             allowedContentTypes: [UTType(filenameExtension: "torrent") ?? .data],
@@ -108,8 +182,8 @@ struct TorrentListView: View {
     }
 
     private var table: some View {
-        Table(store.snapshots, selection: $selection) {
-            TableColumn("Name") { snapshot in
+        Table(displayedSnapshots, selection: $selection, sortOrder: $sortOrder) {
+            TableColumn("Name", value: \.name) { snapshot in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(snapshot.name)
                         .lineLimit(1)
@@ -126,39 +200,44 @@ struct TorrentListView: View {
             }
             .width(min: 220, ideal: 320)
 
-            TableColumn("Status") { snapshot in
-                Text(statusText(snapshot))
-                    .foregroundStyle(snapshot.state == .failed ? .red : .secondary)
+            TableColumn("Status", value: \.statusSortKey) { snapshot in
+                HStack(spacing: 5) {
+                    Image(systemName: snapshot.state.iconName)
+                        .foregroundStyle(snapshot.state.tint)
+                        .font(.caption)
+                    Text(statusText(snapshot))
+                        .foregroundStyle(snapshot.state == .failed ? .red : .secondary)
+                }
             }
             .width(min: 90, ideal: 120)
 
-            TableColumn("Size") { snapshot in
+            TableColumn("Size", value: \.totalLength) { snapshot in
                 Text(snapshot.totalLength > 0 ? formatBytes(snapshot.totalLength) : "—")
                     .monospacedDigit()
             }
             .width(70)
 
-            TableColumn("Down") { snapshot in
+            TableColumn("Down", value: \.downloadRate) { snapshot in
                 Text(formatRate(snapshot.downloadRate)).monospacedDigit()
             }
             .width(80)
 
-            TableColumn("Up") { snapshot in
+            TableColumn("Up", value: \.uploadRate) { snapshot in
                 Text(formatRate(snapshot.uploadRate)).monospacedDigit()
             }
             .width(80)
 
-            TableColumn("ETA") { snapshot in
+            TableColumn("ETA", value: \.etaSortKey) { snapshot in
                 Text(formatETA(snapshot.eta)).monospacedDigit()
             }
             .width(70)
 
-            TableColumn("Peers") { snapshot in
+            TableColumn("Peers", value: \.peerCount) { snapshot in
                 Text("\(snapshot.peerCount)").monospacedDigit()
             }
             .width(45)
 
-            TableColumn("Ratio") { snapshot in
+            TableColumn("Ratio", value: \.ratio) { snapshot in
                 Text(String(format: "%.2f", snapshot.ratio)).monospacedDigit()
             }
             .width(45)
@@ -169,6 +248,71 @@ struct TorrentListView: View {
             for hash in hashes {
                 store.revealInFinder(hash)
             }
+        }
+    }
+
+    // MARK: - Status bar
+
+    private var statusBar: some View {
+        HStack(spacing: 14) {
+            Picker("Show", selection: $statusFilter) {
+                ForEach(StatusFilter.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+            .help("Show only torrents in this state")
+
+            if !sortOrder.isEmpty {
+                Button("Manual Order") { sortOrder = [] }
+                    .buttonStyle(.link)
+                    .font(.caption)
+                    .help("Return to queue order")
+            }
+
+            Spacer()
+
+            Group {
+                let active = store.snapshots.count {
+                    $0.state == .downloading || $0.state == .seeding
+                }
+                Text("\(active) of \(store.snapshots.count) active")
+
+                Label("\(store.dhtNodeCount)", systemImage: "point.3.connected.trianglepath.dotted")
+                    .help("DHT nodes in the routing table")
+
+                Label(portMappingSummary, systemImage: "network")
+                    .help("Router port mapping (NAT-PMP)")
+
+                if store.activeEncryptionPolicy != .disabled {
+                    Label(
+                        store.activeEncryptionPolicy == .required ? "Required" : "Preferred",
+                        systemImage: "lock"
+                    )
+                    .help("Peer-connection encryption (MSE/PE)")
+                }
+
+                Label(formatRate(store.totalDownloadRate), systemImage: "arrow.down")
+                    .help("Total download rate")
+                Label(formatRate(store.totalUploadRate), systemImage: "arrow.up")
+                    .help("Total upload rate")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(.bar)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private var portMappingSummary: String {
+        switch store.portMappingStatus {
+        case .disabled: "Off"
+        case .mapping: "Mapping…"
+        case .mapped(let port, _): "Port \(port)"
+        case .failed: "No mapping"
         }
     }
 
@@ -186,12 +330,28 @@ struct TorrentListView: View {
             if selected.contains(where: { $0.state == .paused }) {
                 Button("Resume") { selected.forEach { store.resume($0.infoHash) } }
             }
-            if selected.contains(where: { $0.state == .downloading || $0.state == .seeding }) {
+            if selected.contains(where: { $0.state == .downloading || $0.state == .seeding || $0.state == .queued }) {
                 Button("Pause") { selected.forEach { store.pause($0.infoHash) } }
             }
             Button("Show in Finder") { selected.forEach { store.revealInFinder($0.infoHash) } }
+            Button("Verify Data") { selected.forEach { store.recheck($0.infoHash) } }
             if selected.count == 1 {
                 Button("Settings…") { editingTorrent = selected[0] }
+            }
+            // Reordering is only meaningful in the manual (queue) order.
+            if selected.count == 1, sortOrder.isEmpty, searchText.isEmpty, statusFilter == .all {
+                let hash = selected[0].infoHash
+                let index = store.snapshots.firstIndex { $0.infoHash == hash } ?? 0
+                Menu("Move") {
+                    Button("To Top") { store.move(hash, .top) }
+                        .disabled(index == 0)
+                    Button("Up") { store.move(hash, .up) }
+                        .disabled(index == 0)
+                    Button("Down") { store.move(hash, .down) }
+                        .disabled(index == store.snapshots.count - 1)
+                    Button("To Bottom") { store.move(hash, .bottom) }
+                        .disabled(index == store.snapshots.count - 1)
+                }
             }
             Divider()
             Button("Remove…", role: .destructive) { pendingRemoval = selected }
@@ -200,6 +360,12 @@ struct TorrentListView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+        // After the window title, before the action icons: the name filter.
+        ToolbarItem(placement: .principal) {
+            ToolbarSearchField(text: $searchText, prompt: "Filter by name")
+                .frame(width: 200)
+        }
+
         ToolbarItemGroup(placement: .primaryAction) {
             Button {
                 showingFileImporter = true
@@ -207,6 +373,7 @@ struct TorrentListView: View {
                 Label("Open Torrent", systemImage: "plus")
             }
             .help("Open a .torrent file")
+            .id(toolbarRefresh)
 
             Button {
                 showingMagnetSheet = true
@@ -214,31 +381,40 @@ struct TorrentListView: View {
                 Label("Add Magnet", systemImage: "link.badge.plus")
             }
             .help("Add a magnet link")
+            .id(toolbarRefresh)
+        }
 
-            Spacer()
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+        }
 
+        ToolbarItemGroup(placement: .primaryAction) {
             Button {
-                selectedOrAll.forEach { store.resume($0.infoHash) }
+                selectedSnapshots.forEach { store.resume($0.infoHash) }
             } label: {
                 Label("Resume", systemImage: "play.fill")
             }
-            .help("Resume")
-            .disabled(!selectedOrAll.contains { $0.state == .paused })
+            .help("Resume the selected torrents")
+            .id(toolbarRefresh)
+            .disabled(!selectedSnapshots.contains { $0.state == .paused })
 
             Button {
-                selectedOrAll.forEach { store.pause($0.infoHash) }
+                selectedSnapshots.forEach { store.pause($0.infoHash) }
             } label: {
                 Label("Pause", systemImage: "pause.fill")
             }
-            .help("Pause")
-            .disabled(!selectedOrAll.contains { $0.state == .downloading || $0.state == .seeding })
+            .help("Pause the selected torrents")
+            .id(toolbarRefresh)
+            .disabled(!selectedSnapshots.contains { $0.state == .downloading || $0.state == .seeding || $0.state == .queued })
 
             Button {
-                pendingRemoval = store.snapshots.filter { selection.contains($0.infoHash) }
+                store.snapshots.filter { selection.contains($0.infoHash) }
+                    .forEach { store.revealInFinder($0.infoHash) }
             } label: {
-                Label("Remove", systemImage: "trash")
+                Label("Show in Finder", systemImage: "folder")
             }
-            .help("Remove selected")
+            .help("Show the downloaded files in Finder")
+            .id(toolbarRefresh)
             .disabled(selection.isEmpty)
 
             Button {
@@ -247,13 +423,36 @@ struct TorrentListView: View {
                 Label("Torrent Settings", systemImage: "gearshape")
             }
             .help("Per-torrent settings (download location, piece order)")
+            .id(toolbarRefresh)
             .disabled(selection.count != 1)
+
+            Button {
+                pendingRemoval = store.snapshots.filter { selection.contains($0.infoHash) }
+            } label: {
+                Label("Remove", systemImage: "trash")
+            }
+            .help("Remove selected")
+            .id(toolbarRefresh)
+            .disabled(selection.isEmpty)
+        }
+
+        if #available(macOS 26.0, *) {
+            ToolbarSpacer(.fixed, placement: .primaryAction)
+        }
+
+        ToolbarItemGroup(placement: .primaryAction) {
+            Button {
+                showInspector.toggle()
+            } label: {
+                Label("Inspector", systemImage: "sidebar.trailing")
+            }
+            .help("Show peers, trackers, and files for the selected torrent")
+            .id(toolbarRefresh)
         }
     }
 
-    private var selectedOrAll: [TorrentSnapshot] {
-        let selected = store.snapshots.filter { selection.contains($0.infoHash) }
-        return selected.isEmpty ? store.snapshots : selected
+    private var selectedSnapshots: [TorrentSnapshot] {
+        store.snapshots.filter { selection.contains($0.infoHash) }
     }
 
     private func pasteboardMagnet() -> String? {
@@ -298,5 +497,79 @@ struct TorrentListView: View {
         store.addMagnet(magnetText.trimmingCharacters(in: .whitespacesAndNewlines))
         magnetText = ""
         showingMagnetSheet = false
+    }
+}
+
+/// A native search field for toolbar placement (SwiftUI's `.searchable` pins
+/// itself to the trailing edge; this one goes wherever it's declared). Clicking
+/// anywhere outside the field gives up keyboard focus, like Finder's search.
+private struct ToolbarSearchField: NSViewRepresentable {
+    @Binding var text: String
+    let prompt: String
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.placeholderString = prompt
+        field.delegate = context.coordinator
+        field.controlSize = .regular
+        // Don't grab keyboard focus at launch (clicking still focuses it).
+        field.refusesFirstResponder = true
+        context.coordinator.installClickAwayMonitor(for: field)
+        return field
+    }
+
+    func updateNSView(_ field: NSSearchField, context: Context) {
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
+
+    static func dismantleNSView(_ field: NSSearchField, coordinator: Coordinator) {
+        coordinator.removeClickAwayMonitor()
+    }
+
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        private let text: Binding<String>
+        private var clickMonitor: Any?
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        deinit {
+            removeClickAwayMonitor()
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSSearchField else { return }
+            text.wrappedValue = field.stringValue
+        }
+
+        /// Resigns focus when a click in the same window lands outside the
+        /// field (the table only takes focus for row clicks, not empty space).
+        func installClickAwayMonitor(for field: NSSearchField) {
+            removeClickAwayMonitor()
+            clickMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak field] event in
+                guard let field,
+                      let window = field.window,
+                      event.window === window,
+                      field.currentEditor() != nil // focused
+                else { return event }
+                let point = field.convert(event.locationInWindow, from: nil)
+                if !field.bounds.contains(point) {
+                    window.makeFirstResponder(nil)
+                }
+                return event
+            }
+        }
+
+        func removeClickAwayMonitor() {
+            if let clickMonitor {
+                NSEvent.removeMonitor(clickMonitor)
+                self.clickMonitor = nil
+            }
+        }
     }
 }

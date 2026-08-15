@@ -9,16 +9,54 @@ public enum TorrentState: String, Sendable {
     case downloading
     case seeding
     case paused
+    /// Waiting for an active-download slot (see max active downloads).
+    case queued
     case failed
 }
 
-/// One file inside a torrent, with its selection state.
+/// One file inside a torrent, with its selection state and progress.
 public struct TorrentFileStatus: Sendable, Identifiable, Equatable {
     public var id: Int { index }
     public let index: Int
     public let path: [String]
     public let length: Int64
     public let wanted: Bool
+    public let completedLength: Int64
+
+    public var progress: Double {
+        length > 0 ? Double(completedLength) / Double(length) : 1
+    }
+}
+
+/// A live view of one connected peer, for the inspector.
+public struct PeerDetail: Sendable, Identifiable {
+    public var id: String { address }
+    public let address: String
+    public let client: String
+    public let downloadRate: Double
+    public let uploadRate: Double
+    /// Fraction of the torrent this peer has.
+    public let progress: Double
+    public let isSeed: Bool
+    public let incoming: Bool
+    public let encrypted: Bool
+    /// We are choking / interested in them.
+    public let chokingPeer: Bool
+    public let interestedInPeer: Bool
+    /// They are choking / interested in us.
+    public let peerChokingUs: Bool
+    public let peerInterestedInUs: Bool
+}
+
+/// A tracker's URL, tier, and most recent announce outcome, for the inspector.
+public struct TrackerDetail: Sendable, Identifiable {
+    public var id: String { url }
+    public let url: String
+    public let tier: Int
+    public let lastError: String?
+    public let lastSuccess: Date?
+    public let seeders: Int?
+    public let leechers: Int?
 }
 
 /// A point-in-time view of one torrent, for UI/CLI display.
@@ -42,6 +80,10 @@ public struct TorrentSnapshot: Sendable, Identifiable {
     /// Per-torrent settings, for the settings UI.
     public let downloadDirectory: String
     public let sequential: Bool
+    /// When the torrent was first added (Unix time; 0 when unknown).
+    public let addedAt: Double
+    /// Piece size in bytes (0 while metadata is unknown).
+    public let pieceLength: Int
 
     public var progress: Double {
         wantedLength > 0 ? Double(completedLength) / Double(wantedLength) : 0
@@ -63,6 +105,14 @@ struct ControllerConfig: Sendable {
     var maxOutstandingPerPeer = 32
     var listenPort: UInt16 = 6881
     var sequential = false
+    /// Seconds between ut_pex (BEP 11) updates; 0 disables sending.
+    var pexIntervalSeconds = 60
+    /// MSE/PE stream-encryption policy for peer connections.
+    var encryptionPolicy: EncryptionPolicy = .disabled
+    /// Stop seeding once the share ratio reaches this (nil = never).
+    var seedRatioLimit: Double?
+    /// Stop seeding after this many seconds of seeding (nil = never).
+    var seedTimeLimit: TimeInterval?
 }
 
 /// Per-torrent orchestrator: owns the peer set, piece manager, storage, and
@@ -92,6 +142,20 @@ actor TorrentController {
         var lastUploadedPayload: Int64 = 0
         /// The peer's message ID for ut_metadata (from its extended handshake).
         var theirUTMetadataID: UInt8?
+        /// The peer's message ID for ut_pex, or nil if it doesn't support it.
+        var theirUTPexID: UInt8?
+        /// The peer's reachable listening endpoint, for gossip via PEX. Known
+        /// immediately for peers we dialed; for incoming peers it's learned
+        /// from the `p` field of their extension handshake.
+        var listenEndpoint: PeerAddress?
+        /// Peers last advertised to this peer, to compute added/dropped deltas.
+        var lastPexAdvertised: Set<PeerAddress> = []
+        /// True if this peer connected to us (rather than us dialing it).
+        var incoming = false
+        /// True if the connection negotiated MSE/PE encryption.
+        var encrypted = false
+        /// The peer's client name/version (`v` handshake string), if sent.
+        var clientVersion: String?
 
         init(connection: PeerConnection, peerID: Data, pieceCount: Int, supportsExtensions: Bool) {
             self.connection = connection
@@ -114,6 +178,9 @@ actor TorrentController {
     private let addedAt: Double
     private let downloadLimiter: RateLimiter?
     private let uploadLimiter: RateLimiter?
+    private let webSeeds: [String]
+    private let webSeedClient: WebSeedClient
+    private var webSeedTask: Task<Void, Never>?
 
     private var peers: [PeerKey: Peer] = [:]
     private var peerTasks: [UUID: Task<Void, Never>] = [:]
@@ -132,6 +199,11 @@ actor TorrentController {
     private var lastDownloadedTotal: Int64 = 0
     private var lastUploadedTotal: Int64 = 0
     private var tickCount = 0
+    /// When the torrent most recently entered the seeding state.
+    private var seedingSince: ContinuousClock.Instant?
+    /// Set once a seed goal has auto-paused this torrent, so a manual resume
+    /// isn't immediately re-paused.
+    private var seedGoalEnforced = false
 
     private var tickTask: Task<Void, Never>?
     private var announceTask: Task<Void, Never>?
@@ -146,9 +218,12 @@ actor TorrentController {
         initialResume: ResumeData? = nil,
         wantedFiles: Set<Int>? = nil,
         downloadLimiter: RateLimiter? = nil,
-        uploadLimiter: RateLimiter? = nil
+        uploadLimiter: RateLimiter? = nil,
+        webSeeds: [String] = []
     ) {
         self.info = info
+        self.webSeeds = webSeeds
+        self.webSeedClient = WebSeedClient(info: info)
         self.store = FileStore(info: info, downloadDirectory: downloadDirectory)
         let resumeWanted = initialResume?.unwantedFiles.map {
             Set(info.files.indices).subtracting($0)
@@ -214,10 +289,12 @@ actor TorrentController {
         state = pieces.isWantedComplete ? .seeding : .downloading
         tickTask = Task { await self.runTicks() }
         announceTask = Task { await self.runAnnounces() }
+        if state == .downloading { startWebSeeds() }
     }
 
     func stop() async {
         let wasActive = state == .downloading || state == .seeding
+        stopWebSeeds()
         tickTask?.cancel()
         announceTask?.cancel()
         for task in peerTasks.values {
@@ -236,15 +313,50 @@ actor TorrentController {
     }
 
     func pause() async {
-        guard state == .downloading || state == .seeding else { return }
+        guard state == .downloading || state == .seeding || state == .queued else { return }
+        let wasActive = state != .queued
         state = .paused
+        stopWebSeeds()
         announceTask?.cancel()
         announceTask = nil
         for peer in peers.values {
             peer.connection.close()
         }
         await saveResume()
+        if wasActive {
+            Task { await self.trackers.announceAll(self.makeAnnounceRequest(event: .stopped)) }
+        }
+    }
+
+    var currentState: TorrentState { state }
+
+    /// Session-injected hook fired when a download completes (frees a slot).
+    private var onBecameSeed: (@Sendable () async -> Void)?
+
+    func setOnBecameSeed(_ handler: @escaping @Sendable () async -> Void) {
+        onBecameSeed = handler
+    }
+
+    /// Parks an actively-downloading torrent while it waits for a slot.
+    func moveToQueue() async {
+        guard state == .downloading else { return }
+        state = .queued
+        stopWebSeeds()
+        announceTask?.cancel()
+        announceTask = nil
+        for peer in peers.values { peer.connection.close() }
+        await saveResume()
         Task { await self.trackers.announceAll(self.makeAnnounceRequest(event: .stopped)) }
+    }
+
+    /// Starts a queued (incomplete) torrent once a slot is free.
+    func startFromQueue() async {
+        guard state == .queued else { return }
+        state = .downloading
+        announceTask = Task { await self.runAnnounces() }
+        dialPeers()
+        startWebSeeds()
+        await saveResume()
     }
 
     func resumeActivity() async {
@@ -252,6 +364,7 @@ actor TorrentController {
         state = pieces.isWantedComplete ? .seeding : .downloading
         announceTask = Task { await self.runAnnounces() }
         dialPeers()
+        if state == .downloading { startWebSeeds() }
         await saveResume()
     }
 
@@ -283,6 +396,30 @@ actor TorrentController {
         guard pieces.sequential != sequential else { return }
         pieces.sequential = sequential
         await saveResume()
+    }
+
+    /// Updates the seed-goal limits (nil = unlimited). Does not re-enforce a
+    /// goal already applied to a torrent the user manually resumed.
+    func setSeedingLimits(ratio: Double?, time: TimeInterval?) {
+        config.seedRatioLimit = ratio
+        config.seedTimeLimit = time
+    }
+
+    private var currentRatio: Double {
+        if downloadedTotal > 0 { return Double(uploadedTotal) / Double(downloadedTotal) }
+        let completed = pieces.completedWantedBytes
+        return completed > 0 ? Double(uploadedTotal) / Double(completed) : 0
+    }
+
+    private func seedGoalReached() -> Bool {
+        if let ratioLimit = config.seedRatioLimit, ratioLimit > 0, currentRatio >= ratioLimit {
+            return true
+        }
+        if let timeLimit = config.seedTimeLimit, timeLimit > 0, let since = seedingSince,
+           ContinuousClock.now - since >= .seconds(timeLimit) {
+            return true
+        }
+        return false
     }
 
     /// Relocates the torrent to a new download directory: transfer stops,
@@ -344,17 +481,107 @@ actor TorrentController {
         dialPeers()
     }
 
+    /// Re-hashes everything on disk and rebuilds the have-set from scratch —
+    /// the user's "verify data" action. Transfer pauses during the scan.
+    func recheck() async {
+        guard state == .downloading || state == .seeding || state == .paused else { return }
+        let wasPaused = state == .paused
+        state = .checking
+        announceTask?.cancel()
+        announceTask = nil
+        for peer in peers.values { peer.connection.close() }
+
+        pieces.resetHave()
+        let existing = await store.verifyAllPieces()
+        for index in 0..<info.pieceCount where existing[index] {
+            pieces.markHave(index)
+        }
+        await store.reconcile(have: pieces.have)
+        await saveResume()
+
+        if wasPaused {
+            state = .paused
+        } else {
+            state = pieces.isWantedComplete ? .seeding : .downloading
+            announceTask = Task { await self.runAnnounces() }
+            dialPeers()
+        }
+    }
+
     // MARK: - File selection
 
     func fileStatuses() -> [TorrentFileStatus] {
-        info.files.enumerated().map { index, file in
-            TorrentFileStatus(
+        let pieceLen = Int64(info.pieceLength)
+        var offset: Int64 = 0
+        return info.files.enumerated().map { index, file in
+            let fileStart = offset
+            let fileEnd = offset + file.length
+            offset = fileEnd
+            // Completed bytes = the portions of each verified piece overlapping
+            // this file's byte range.
+            var done: Int64 = 0
+            if file.length > 0 {
+                for piece in Int(fileStart / pieceLen)...Int((fileEnd - 1) / pieceLen)
+                where pieces.have[piece] {
+                    let pieceStart = Int64(piece) * pieceLen
+                    let pieceEnd = pieceStart + Int64(info.pieceSize(at: piece))
+                    done += max(0, min(pieceEnd, fileEnd) - max(pieceStart, fileStart))
+                }
+            }
+            return TorrentFileStatus(
                 index: index,
                 path: file.path,
                 length: file.length,
-                wanted: pieces.wantedFiles.contains(index)
+                wanted: pieces.wantedFiles.contains(index),
+                completedLength: done
             )
         }
+    }
+
+    /// Live details of every connected peer, for the inspector.
+    func peerDetails() -> [PeerDetail] {
+        peers.values.map { peer in
+            let endpoint = peer.listenEndpoint ?? peer.connection.address
+            return PeerDetail(
+                address: endpoint.description,
+                client: PeerClient.describe(peerID: peer.peerID, version: peer.clientVersion),
+                downloadRate: peer.downloadRateEMA,
+                uploadRate: peer.uploadRateEMA,
+                progress: info.pieceCount > 0
+                    ? Double(peer.bitfield.setCount) / Double(info.pieceCount) : 0,
+                isSeed: peer.bitfield.isFull,
+                incoming: peer.incoming,
+                encrypted: peer.encrypted,
+                chokingPeer: peer.amChoking,
+                interestedInPeer: peer.amInterested,
+                peerChokingUs: peer.peerChoking,
+                peerInterestedInUs: peer.peerInterested
+            )
+        }
+        .sorted { $0.address < $1.address }
+    }
+
+    /// Per-tracker status for the inspector.
+    func trackerDetails() async -> [TrackerDetail] {
+        let tiers = await trackers.allTrackers
+        let errors = await trackers.lastErrors
+        let success = await trackers.lastSuccess
+        let seeders = await trackers.lastSeeders
+        let leechers = await trackers.lastLeechers
+        var out: [TrackerDetail] = []
+        for (tierIndex, tier) in tiers.enumerated() {
+            for url in tier {
+                out.append(TrackerDetail(
+                    url: url,
+                    tier: tierIndex,
+                    lastError: errors[url],
+                    lastSuccess: success[url],
+                    seeders: seeders[url],
+                    leechers: leechers[url]
+                ))
+            }
+        }
+        return out
     }
 
     /// Changes which files are downloaded. A seeding torrent that gains new
@@ -409,7 +636,9 @@ actor TorrentController {
             havePieces: pieces.have.setCount,
             errorMessage: errorMessage,
             downloadDirectory: downloadDirectory.path,
-            sequential: pieces.sequential
+            sequential: pieces.sequential,
+            addedAt: addedAt,
+            pieceLength: info.pieceLength
         )
     }
 
@@ -457,6 +686,61 @@ actor TorrentController {
         _ = try? await trackers.announce(makeAnnounceRequest(event: .completed))
     }
 
+    // MARK: - Web seeds (BEP 19)
+
+    private func startWebSeeds() {
+        guard !webSeeds.isEmpty, webSeedTask == nil else { return }
+        webSeedTask = Task { await self.runWebSeeds() }
+    }
+
+    private func stopWebSeeds() {
+        webSeedTask?.cancel()
+        webSeedTask = nil
+    }
+
+    /// Pulls missing pieces from HTTP mirrors while downloading — an extra
+    /// source alongside peers. Sequential; rotates mirrors on failure.
+    private func runWebSeeds() async {
+        var urlIndex = 0
+        while !Task.isCancelled {
+            guard state == .downloading else {
+                try? await Task.sleep(for: .seconds(1))
+                continue
+            }
+            guard let piece = pieces.nextMissingWantedPiece() else {
+                try? await Task.sleep(for: .seconds(2)) // wait for peers to free work / finish
+                continue
+            }
+            let base = webSeeds[urlIndex % webSeeds.count]
+            do {
+                let data = try await webSeedClient.fetchPiece(piece, from: base)
+                await ingestWebSeedPiece(piece, data: data)
+            } catch {
+                urlIndex += 1 // rotate to another mirror
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+        }
+    }
+
+    private func ingestWebSeedPiece(_ index: Int, data: Data) async {
+        guard state == .downloading, !pieces.have[index],
+              data.count == info.pieceSize(at: index),
+              Data(Insecure.SHA1.hash(data: data)) == info.pieceHashes[index]
+        else { return }
+        do {
+            try await store.writePiece(data, at: index)
+        } catch {
+            return
+        }
+        pieces.pieceVerified(index)
+        downloadedTotal += Int64(data.count)
+        await store.finalizeCompletedFiles(after: index, have: pieces.have)
+        await broadcastHave(index)
+        if pieces.isWantedComplete {
+            await downloadCompleted()
+        }
+    }
+
     // MARK: - Peer dialing
 
     private func dialPeers() {
@@ -478,10 +762,29 @@ actor TorrentController {
     }
 
     private func runOutgoingPeer(_ address: PeerAddress) async {
+        let policy = config.encryptionPolicy
+        if await attemptOutgoing(address, encrypt: policy != .disabled, require: policy == .required) {
+            return
+        }
+        // "Preferred" retries once in plaintext for peers that can't do MSE.
+        if policy == .preferred, await attemptOutgoing(address, encrypt: false, require: false) {
+            return
+        }
+        connectedAddresses.remove(address)
+    }
+
+    /// One outgoing connection attempt. Returns true if the peer loop ran to
+    /// completion (so no fallback is needed), false if the caller may retry.
+    private func attemptOutgoing(_ address: PeerAddress, encrypt: Bool, require: Bool) async -> Bool {
         let connection = PeerConnection(address: address)
         do {
             await connection.setLimiters(download: downloadLimiter, upload: uploadLimiter)
             try await connection.start()
+            if encrypt {
+                _ = try await connection.mseInitiatorHandshake(
+                    infoHash: info.infoHash, requireEncryption: require
+                )
+            }
             try await connection.sendHandshake(
                 Handshake(infoHash: info.infoHash, peerID: sessionPeerID)
             )
@@ -489,10 +792,11 @@ actor TorrentController {
             guard theirs.infoHash == info.infoHash, theirs.peerID != sessionPeerID else {
                 throw PeerWireError.handshakeFailed("wrong torrent or self-connection")
             }
-            await runPeerLoop(connection: connection, handshake: theirs, address: address)
+            await runPeerLoop(connection: connection, handshake: theirs, address: address, outgoing: true)
+            return true
         } catch {
             connection.close()
-            connectedAddresses.remove(address)
+            return false
         }
     }
 
@@ -514,7 +818,7 @@ actor TorrentController {
                 try await connection.sendHandshake(
                     Handshake(infoHash: self.info.infoHash, peerID: self.sessionPeerID)
                 )
-                await self.runPeerLoop(connection: connection, handshake: handshake, address: address)
+                await self.runPeerLoop(connection: connection, handshake: handshake, address: address, outgoing: false)
             } catch {
                 connection.close()
                 await self.removeAddress(address)
@@ -527,7 +831,9 @@ actor TorrentController {
         connectedAddresses.remove(address)
     }
 
-    private func runPeerLoop(connection: PeerConnection, handshake: Handshake, address: PeerAddress) async {
+    private func runPeerLoop(
+        connection: PeerConnection, handshake: Handshake, address: PeerAddress, outgoing: Bool
+    ) async {
         let key = PeerKey(connection)
         let peer = Peer(
             connection: connection,
@@ -535,12 +841,19 @@ actor TorrentController {
             pieceCount: info.pieceCount,
             supportsExtensions: handshake.supportsExtensions
         )
+        // For peers we dialed, the address we dialed is their listening
+        // endpoint; incoming peers' endpoints are learned from `p` later.
+        peer.incoming = !outgoing
+        peer.encrypted = await connection.isEncrypted
+        if outgoing { peer.listenEndpoint = address }
         peers[key] = peer
 
         do {
             if handshake.supportsExtensions {
                 try await connection.send(.extended(id: 0, payload: ExtensionHandshake.encode(
-                    metadataSize: info.rawData.count, listenPort: config.listenPort
+                    metadataSize: info.rawData.count,
+                    listenPort: config.listenPort,
+                    pexID: info.isPrivate ? nil : ExtensionHandshake.utPexID
                 )))
             }
             if !pieces.have.isEmpty {
@@ -650,7 +963,21 @@ actor TorrentController {
         if id == 0 {
             if let parsed = ExtensionHandshake.parse(payload) {
                 peer.theirUTMetadataID = parsed.utMetadataID
+                peer.theirUTPexID = parsed.utPexID
+                if let client = parsed.client { peer.clientVersion = client }
+                // Learn an incoming peer's real listening endpoint from `p`.
+                if peer.listenEndpoint == nil, let listenPort = parsed.listenPort {
+                    peer.listenEndpoint = PeerAddress(
+                        host: peer.connection.address.host, port: listenPort
+                    )
+                }
             }
+            return
+        }
+        if id == ExtensionHandshake.utPexID {
+            // BEP 11 is disabled for private torrents.
+            guard !info.isPrivate else { return }
+            addKnownPeers(UTPex.parseAdded(payload))
             return
         }
         guard id == ExtensionHandshake.utMetadataID,
@@ -777,14 +1104,42 @@ actor TorrentController {
         }
     }
 
+    /// Sends each PEX-capable peer the added/dropped deltas of our *other*
+    /// peers' reachable endpoints since the last update (BEP 11).
+    private func sendPEXUpdates() async {
+        let pool = Set(peers.values.compactMap(\.listenEndpoint))
+        for peer in Array(peers.values) {
+            guard let pexID = peer.theirUTPexID else { continue }
+            // Never advertise a peer to itself.
+            var current = pool
+            if let own = peer.listenEndpoint { current.remove(own) }
+
+            let added = Array(current.subtracting(peer.lastPexAdvertised).prefix(UTPex.maxPerMessage))
+            let dropped = Array(peer.lastPexAdvertised.subtracting(current).prefix(UTPex.maxPerMessage))
+            guard !added.isEmpty || !dropped.isEmpty else { continue }
+
+            // Record exactly what we sent so future deltas stay accurate.
+            peer.lastPexAdvertised.subtract(dropped)
+            peer.lastPexAdvertised.formUnion(added)
+            try? await peer.connection.send(.extended(
+                id: pexID, payload: UTPex.encode(added: added, dropped: dropped)
+            ))
+        }
+    }
+
     private func downloadCompleted() async {
         state = .seeding
+        stopWebSeeds()
         // No longer interested in anyone.
         for peer in peers.values where peer.amInterested {
             peer.amInterested = false
             try? await peer.connection.send(.notInterested)
         }
         Task { await self.announceCompleted() }
+        // Freed an active-download slot — let the session promote a queued one.
+        if let onBecameSeed {
+            Task { await onBecameSeed() }
+        }
     }
 
     // MARK: - Tick loop
@@ -852,9 +1207,26 @@ actor TorrentController {
             }
         }
 
+        // Peer exchange (BEP 11) updates on the configured cadence.
+        if config.pexIntervalSeconds > 0, !info.isPrivate,
+           tickCount % config.pexIntervalSeconds == 0 {
+            await sendPEXUpdates()
+        }
+
         // Top up connections.
         if tickCount % 5 == 0 {
             dialPeers()
+        }
+
+        // Enforce seed goals (ratio / time), once per torrent.
+        if state == .seeding {
+            if seedingSince == nil { seedingSince = .now }
+            if !seedGoalEnforced, seedGoalReached() {
+                seedGoalEnforced = true
+                await pause()
+            }
+        } else {
+            seedingSince = nil
         }
 
         // Periodic resume-data checkpoint.

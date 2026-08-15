@@ -332,4 +332,21 @@ final class PieceManager {
     func markHave(_ index: Int) {
         pieceVerified(index)
     }
+
+    /// The lowest wanted, missing piece not already being fetched from peers —
+    /// for web seeds to grab without duplicating peer work.
+    func nextMissingWantedPiece() -> Int? {
+        for index in 0..<info.pieceCount
+        where wantedPieces[index] && !have[index] && inProgress[index] == nil {
+            return index
+        }
+        return nil
+    }
+
+    /// Clears all verified state so a full re-check can re-populate it.
+    func resetHave() {
+        have = Bitfield(count: info.pieceCount)
+        completedLength = 0
+        inProgress.removeAll()
+    }
 }

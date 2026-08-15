@@ -21,6 +21,7 @@ actor MagnetController {
     /// unresolved — there are no files to move yet).
     private(set) var downloadDirectory: URL
     private(set) var sequential: Bool
+    private let encryptionPolicy: EncryptionPolicy
 
     private var knownAddresses: Set<PeerAddress> = []
     private var attemptedRecently: Set<PeerAddress> = []
@@ -38,6 +39,7 @@ actor MagnetController {
         listenPort: UInt16,
         downloadDirectory: URL,
         sequential: Bool,
+        encryptionPolicy: EncryptionPolicy = .disabled,
         discoverPeers: (@Sendable () async -> [PeerAddress])? = nil,
         onResolved: (@Sendable (Data) async -> Void)? = nil
     ) {
@@ -46,6 +48,7 @@ actor MagnetController {
         self.listenPort = listenPort
         self.downloadDirectory = downloadDirectory
         self.sequential = sequential
+        self.encryptionPolicy = encryptionPolicy
         self.trackers = TrackerManager(tiers: magnet.trackers.map { [$0] })
         self.discoverPeers = discoverPeers
         self.onResolved = onResolved
@@ -91,7 +94,9 @@ actor MagnetController {
             havePieces: 0,
             errorMessage: nil,
             downloadDirectory: downloadDirectory.path,
-            sequential: sequential
+            sequential: sequential,
+            addedAt: addedAt,
+            pieceLength: 0
         )
     }
 
@@ -164,6 +169,11 @@ actor MagnetController {
         defer { connection.close() }
         do {
             try await connection.start()
+            if encryptionPolicy != .disabled {
+                _ = try await connection.mseInitiatorHandshake(
+                    infoHash: magnet.infoHash, requireEncryption: encryptionPolicy == .required
+                )
+            }
             try await connection.sendHandshake(Handshake(
                 infoHash: magnet.infoHash, peerID: sessionPeerID
             ))

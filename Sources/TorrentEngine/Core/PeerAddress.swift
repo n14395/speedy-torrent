@@ -32,6 +32,22 @@ public enum CompactPeers {
         }
     }
 
+    /// BEP 23: encode peers with dotted-quad IPv4 hosts into 6-byte entries.
+    /// Non-IPv4 hosts (e.g. IPv6) are skipped — callers advertise those via a
+    /// separate `added6` field if at all.
+    public static func encodeIPv4(_ peers: [PeerAddress]) -> Data {
+        var out = Data(capacity: peers.count * 6)
+        for peer in peers {
+            let parts = peer.host.split(separator: ".", omittingEmptySubsequences: false)
+            guard parts.count == 4, peer.port > 0 else { continue }
+            let octets = parts.compactMap { UInt8($0) }
+            guard octets.count == 4 else { continue }
+            out.append(contentsOf: octets)
+            out.appendUInt16(peer.port)
+        }
+        return out
+    }
+
     private static func parse(
         _ data: Data, addressBytes: Int, format: ([UInt8]) -> String
     ) -> [PeerAddress] {
@@ -62,5 +78,35 @@ public enum PeerID {
             data.append(alphabet.randomElement()!)
         }
         return data
+    }
+}
+
+/// Best-effort client identification for the inspector.
+public enum PeerClient {
+    /// Prefers the BEP 10 `v` string; falls back to decoding the BEP 20 peer ID.
+    public static func describe(peerID: Data, version: String?) -> String {
+        if let version, !version.isEmpty { return version }
+        return fromPeerID(peerID)
+    }
+
+    private static let names: [String: String] = [
+        "AZ": "Azureus", "qB": "qBittorrent", "UT": "µTorrent", "UM": "µTorrent",
+        "UW": "µTorrent Web", "TR": "Transmission", "DE": "Deluge", "LT": "libtorrent",
+        "lt": "libtorrent", "BT": "BitTorrent", "BW": "BitTorrent", "ST": "SpeedyTorrent",
+        "TX": "Tixati", "FD": "Free Download Manager", "WD": "WebTorrent",
+    ]
+
+    private static func fromPeerID(_ peerID: Data) -> String {
+        let bytes = [UInt8](peerID)
+        guard bytes.count >= 8,
+              bytes[0] == UInt8(ascii: "-"), bytes[7] == UInt8(ascii: "-")
+        else { return "unknown" }
+        let code = String(decoding: bytes[1...2], as: UTF8.self)
+        let name = names[code] ?? code
+        let digits = bytes[3..<7].map { Character(UnicodeScalar($0)) }
+        let version = digits.allSatisfy(\.isNumber)
+            ? digits.map(String.init).joined(separator: ".")
+            : String(digits)
+        return version.isEmpty ? name : "\(name) \(version)"
     }
 }

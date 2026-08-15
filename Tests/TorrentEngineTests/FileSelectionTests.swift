@@ -145,6 +145,9 @@ private func makeMultiFileInfo(lengths: [Int], pieceLength: Int = 16384) throws 
 
         let statuses = try await leecher.fileStatuses(for: hash)
         #expect(statuses.map(\.wanted) == [false, true, false])
+        // Per-file progress: the finished wanted file reads as 100%.
+        #expect(statuses[1].completedLength == statuses[1].length)
+        #expect(statuses[1].progress == 1)
 
         // Phase 2: want everything.
         try await leecher.setWantedFiles([0, 1, 2], for: hash)
@@ -161,6 +164,9 @@ private func makeMultiFileInfo(lengths: [Int], pieceLength: Int = 16384) throws 
         for (index, data) in fileContents.enumerated() {
             #expect(try Data(contentsOf: leechDir.appendingPathComponent("payload/f\(index).bin")) == data, "f\(index)")
         }
+        // Every file now reports fully complete.
+        let finalStatuses = try await leecher.fileStatuses(for: hash)
+        #expect(finalStatuses.allSatisfy { $0.completedLength == $0.length })
 
         await leecher.shutdown()
         await seeder.shutdown()

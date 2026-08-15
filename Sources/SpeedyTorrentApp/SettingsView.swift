@@ -10,6 +10,10 @@ struct SettingsView: View {
     @AppStorage(Defaults.downloadRateLimitKiB) private var downloadRateLimitKiB = 0
     @AppStorage(Defaults.uploadRateLimitKiB) private var uploadRateLimitKiB = 0
     @AppStorage(Defaults.maxPeers) private var maxPeers = 40
+    @AppStorage(Defaults.encryptionPolicy) private var encryptionPolicy = EncryptionPolicy.preferred.rawValue
+    @AppStorage(Defaults.seedRatioLimit) private var seedRatioLimit = 0.0
+    @AppStorage(Defaults.seedTimeLimitMinutes) private var seedTimeLimitMinutes = 0
+    @AppStorage(Defaults.maxActiveDownloads) private var maxActiveDownloads = 0
 
     @State private var showingFolderPicker = false
 
@@ -43,6 +47,45 @@ struct SettingsView: View {
                 limitField("Upload limit", value: $uploadRateLimitKiB)
             }
 
+            Section {
+                LabeledContent("Stop seeding at ratio") {
+                    HStack(spacing: 6) {
+                        TextField("", value: $seedRatioLimit, format: .number.precision(.fractionLength(0...2)))
+                            .frame(width: 80)
+                            .multilineTextAlignment(.trailing)
+                            .onSubmit { store.applySettings() }
+                        Text("0 = unlimited").foregroundStyle(.secondary)
+                    }
+                }
+                .onChange(of: seedRatioLimit) { store.applySettings() }
+                LabeledContent("Stop seeding after") {
+                    HStack(spacing: 6) {
+                        TextField("", value: $seedTimeLimitMinutes, format: .number)
+                            .frame(width: 80)
+                            .multilineTextAlignment(.trailing)
+                            .onSubmit { store.applySettings() }
+                        Text("minutes (0 = unlimited)").foregroundStyle(.secondary)
+                    }
+                }
+                .onChange(of: seedTimeLimitMinutes) { store.applySettings() }
+                LabeledContent("Max active downloads") {
+                    HStack(spacing: 6) {
+                        TextField("", value: $maxActiveDownloads, format: .number)
+                            .frame(width: 80)
+                            .multilineTextAlignment(.trailing)
+                            .onSubmit { store.applySettings() }
+                        Text("0 = unlimited").foregroundStyle(.secondary)
+                    }
+                }
+                .onChange(of: maxActiveDownloads) { store.applySettings() }
+            } header: {
+                Text("Seeding")
+            } footer: {
+                Text("A finished torrent stops seeding once it reaches either limit; resuming it manually keeps it seeding.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Network") {
                 TextField("Listening port", value: $listenPort, format: .number.grouping(.never))
                     .frame(width: 220)
@@ -51,6 +94,19 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 TextField("Max peers per torrent", value: $maxPeers, format: .number)
                     .frame(width: 220)
+                LabeledContent("Router port mapping") {
+                    Text(store.portMappingStatus.summary)
+                        .foregroundStyle(portMappingColor)
+                }
+                Picker("Encryption", selection: $encryptionPolicy) {
+                    Text("Off").tag(EncryptionPolicy.disabled.rawValue)
+                    Text("Prefer").tag(EncryptionPolicy.preferred.rawValue)
+                    Text("Require").tag(EncryptionPolicy.required.rawValue)
+                }
+                .frame(width: 260)
+                Text("MSE/PE obfuscates peer connections to resist ISP throttling and reach peers that require it. Changes apply after relaunch.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -65,6 +121,14 @@ struct SettingsView: View {
 
     private var abbreviatedPath: String {
         (downloadDirectory as NSString).abbreviatingWithTildeInPath
+    }
+
+    private var portMappingColor: Color {
+        switch store.portMappingStatus {
+        case .mapped: .green
+        case .failed: .secondary
+        default: .secondary
+        }
     }
 
     private func limitField(_ title: String, value: Binding<Int>) -> some View {

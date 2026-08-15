@@ -11,6 +11,10 @@ enum Defaults {
     static let downloadRateLimitKiB = "downloadRateLimitKiB" // 0 = unlimited
     static let uploadRateLimitKiB = "uploadRateLimitKiB"
     static let maxPeers = "maxPeers"
+    static let encryptionPolicy = "encryptionPolicy"
+    static let seedRatioLimit = "seedRatioLimit"        // 0 = unlimited
+    static let seedTimeLimitMinutes = "seedTimeLimitMinutes" // 0 = unlimited
+    static let maxActiveDownloads = "maxActiveDownloads"     // 0 = unlimited
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -21,6 +25,10 @@ enum Defaults {
             downloadRateLimitKiB: 0,
             uploadRateLimitKiB: 0,
             maxPeers: 40,
+            encryptionPolicy: EncryptionPolicy.preferred.rawValue,
+            seedRatioLimit: 0.0,
+            seedTimeLimitMinutes: 0,
+            maxActiveDownloads: 0,
         ])
     }
 }
@@ -58,6 +66,10 @@ final class SessionStore {
     private(set) var session: TorrentSession?
     private(set) var snapshots: [TorrentSnapshot] = []
     private(set) var startupError: String?
+    private(set) var portMappingStatus: PortMappingStatus = .disabled
+    private(set) var dhtNodeCount = 0
+    /// The encryption policy the session was started with (status-bar display).
+    private(set) var activeEncryptionPolicy: EncryptionPolicy = .preferred
     var lastActionError: String?
 
     /// FIFO of opened-but-unconfirmed torrents; the first drives the
@@ -94,10 +106,19 @@ final class SessionStore {
             sequentialDownload: defaults.bool(forKey: Defaults.sequentialDownload),
             stateDirectory: stateDir,
             downloadRateLimit: downKiB > 0 ? downKiB * 1024 : nil,
-            uploadRateLimit: upKiB > 0 ? upKiB * 1024 : nil
+            uploadRateLimit: upKiB > 0 ? upKiB * 1024 : nil,
+            enablePortMapping: true,
+            enableLSD: true,
+            encryptionPolicy: EncryptionPolicy(
+                rawValue: defaults.string(forKey: Defaults.encryptionPolicy) ?? ""
+            ) ?? .preferred,
+            seedRatioLimit: Self.seedRatio(defaults),
+            seedTimeLimit: Self.seedTime(defaults),
+            maxActiveDownloads: Self.maxActive(defaults)
         )
         let session = TorrentSession(configuration: configuration)
         self.session = session
+        self.activeEncryptionPolicy = configuration.encryptionPolicy
 
         pollTask = Task {
             await session.restore()
@@ -117,8 +138,16 @@ final class SessionStore {
             while !Task.isCancelled {
                 let snaps = await session.snapshots()
                 self.noticeCompletions(snaps)
-                self.snapshots = snaps
+                // Don't rebuild the torrent table mid mouse-gesture: a reload
+                // can cancel an in-flight click/drag on a row, reverting the
+                // selection the user just made. Deferred ticks are caught up
+                // on the next poll after the button is released.
+                if !NSApplication.shared.isActive || NSEvent.pressedMouseButtons == 0 {
+                    self.snapshots = snaps
+                }
                 await self.refreshPendingMetadata(session)
+                self.portMappingStatus = await session.portMappingStatus()
+                self.dhtNodeCount = await session.dhtNodeCount()
                 try? await Task.sleep(for: .seconds(1))
             }
         }
@@ -263,6 +292,16 @@ final class SessionStore {
         return (try? await session.fileStatuses(for: infoHash)) ?? []
     }
 
+    func peerDetails(for infoHash: InfoHash) async -> [PeerDetail] {
+        guard let session else { return [] }
+        return await session.peerDetails(for: infoHash)
+    }
+
+    func trackerDetails(for infoHash: InfoHash) async -> [TrackerDetail] {
+        guard let session else { return [] }
+        return await session.trackerDetails(for: infoHash)
+    }
+
     func setWantedFiles(_ wanted: Set<Int>, for infoHash: InfoHash) {
         run("change the file selection") { try await $0.setWantedFiles(wanted, for: infoHash) }
     }
@@ -303,6 +342,14 @@ final class SessionStore {
 
     // MARK: - Actions
 
+    func recheck(_ infoHash: InfoHash) {
+        run("verify data") { try await $0.recheckTorrent(infoHash) }
+    }
+
+    func move(_ infoHash: InfoHash, _ direction: TorrentSession.QueueMove) {
+        run("reorder") { try await $0.moveTorrent(infoHash, direction) }
+    }
+
     func pause(_ infoHash: InfoHash) {
         run("pause") { try await $0.pauseTorrent(infoHash) }
     }
@@ -337,13 +384,33 @@ final class SessionStore {
         let downKiB = defaults.integer(forKey: Defaults.downloadRateLimitKiB)
         let upKiB = defaults.integer(forKey: Defaults.uploadRateLimitKiB)
         let sequential = defaults.bool(forKey: Defaults.sequentialDownload)
+        let ratio = Self.seedRatio(defaults)
+        let time = Self.seedTime(defaults)
+        let active = Self.maxActive(defaults)
         run("apply settings") { session in
             await session.setRateLimits(
                 download: downKiB > 0 ? downKiB * 1024 : nil,
                 upload: upKiB > 0 ? upKiB * 1024 : nil
             )
             await session.setSequentialDownload(sequential)
+            await session.setSeedingLimits(ratio: ratio, time: time)
+            await session.setMaxActiveDownloads(active)
         }
+    }
+
+    private static func seedRatio(_ defaults: UserDefaults) -> Double? {
+        let value = defaults.double(forKey: Defaults.seedRatioLimit)
+        return value > 0 ? value : nil
+    }
+
+    private static func seedTime(_ defaults: UserDefaults) -> TimeInterval? {
+        let minutes = defaults.integer(forKey: Defaults.seedTimeLimitMinutes)
+        return minutes > 0 ? TimeInterval(minutes * 60) : nil
+    }
+
+    private static func maxActive(_ defaults: UserDefaults) -> Int? {
+        let value = defaults.integer(forKey: Defaults.maxActiveDownloads)
+        return value > 0 ? value : nil
     }
 
     private func run(_ label: String, _ body: @escaping @Sendable (TorrentSession) async throws -> Void) {
@@ -397,7 +464,31 @@ extension TorrentState {
         case .downloading: "Downloading"
         case .seeding: "Seeding"
         case .paused: "Paused"
+        case .queued: "Queued"
         case .failed: "Error"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .fetchingMetadata: "antenna.radiowaves.left.and.right"
+        case .checking: "magnifyingglass.circle.fill"
+        case .moving: "shippingbox.fill"
+        case .downloading: "arrow.down.circle.fill"
+        case .seeding: "arrow.up.circle.fill"
+        case .paused: "pause.circle.fill"
+        case .queued: "clock.fill"
+        case .failed: "exclamationmark.triangle.fill"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .downloading: .blue
+        case .seeding: .green
+        case .failed: .red
+        case .fetchingMetadata, .checking, .moving: .orange
+        case .paused, .queued: .secondary
         }
     }
 }

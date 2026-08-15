@@ -9,6 +9,16 @@ public enum SessionError: Error, Equatable {
     case moveFailed(String)
 }
 
+/// How the engine uses MSE/PE stream encryption.
+public enum EncryptionPolicy: String, Sendable, CaseIterable {
+    /// Plaintext only.
+    case disabled
+    /// Prefer encryption; fall back to plaintext for peers that can't do it.
+    case preferred
+    /// Only connect to (and accept) encrypted peers.
+    case required
+}
+
 /// The engine's top-level API: owns all torrents, the shared listening socket,
 /// and global settings.
 public actor TorrentSession {
@@ -24,6 +34,21 @@ public actor TorrentSession {
         public var downloadRateLimit: Int?
         public var uploadRateLimit: Int?
         public var enableDHT: Bool
+        /// Seconds between ut_pex updates (BEP 11); 0 disables sending.
+        public var pexIntervalSeconds: Int
+        /// Map the listening port on the router via NAT-PMP.
+        public var enablePortMapping: Bool
+        /// Discover LAN peers via Local Service Discovery (BEP 14).
+        public var enableLSD: Bool
+        /// MSE/PE stream-encryption policy.
+        public var encryptionPolicy: EncryptionPolicy
+        /// Stop seeding at this share ratio (nil = never).
+        public var seedRatioLimit: Double?
+        /// Stop seeding after this many seconds (nil = never).
+        public var seedTimeLimit: TimeInterval?
+        /// Max torrents downloading at once; the rest queue (nil = unlimited).
+        /// Completed torrents seed without counting against this.
+        public var maxActiveDownloads: Int?
 
         public init(
             downloadDirectory: URL,
@@ -33,7 +58,14 @@ public actor TorrentSession {
             stateDirectory: URL? = nil,
             downloadRateLimit: Int? = nil,
             uploadRateLimit: Int? = nil,
-            enableDHT: Bool = true
+            enableDHT: Bool = true,
+            pexIntervalSeconds: Int = 60,
+            enablePortMapping: Bool = false,
+            enableLSD: Bool = false,
+            encryptionPolicy: EncryptionPolicy = .disabled,
+            seedRatioLimit: Double? = nil,
+            seedTimeLimit: TimeInterval? = nil,
+            maxActiveDownloads: Int? = nil
         ) {
             self.downloadDirectory = downloadDirectory
             self.listenPort = listenPort
@@ -43,6 +75,13 @@ public actor TorrentSession {
             self.downloadRateLimit = downloadRateLimit
             self.uploadRateLimit = uploadRateLimit
             self.enableDHT = enableDHT
+            self.pexIntervalSeconds = pexIntervalSeconds
+            self.enablePortMapping = enablePortMapping
+            self.enableLSD = enableLSD
+            self.encryptionPolicy = encryptionPolicy
+            self.seedRatioLimit = seedRatioLimit
+            self.seedTimeLimit = seedTimeLimit
+            self.maxActiveDownloads = maxActiveDownloads
         }
     }
 
@@ -61,6 +100,9 @@ public actor TorrentSession {
     private let uploadLimiter: RateLimiter
     private let dht = DHTNode()
     private var dhtTask: Task<Void, Never>?
+    private let portMapper = PortMapper()
+    private let lsd = LSDService()
+    private var lsdTask: Task<Void, Never>?
 
     public init(configuration: Configuration) {
         self.configuration = configuration
@@ -76,6 +118,15 @@ public actor TorrentSession {
         await uploadLimiter.setRate(upload)
     }
 
+    /// Updates the seed-goal limits for new and existing torrents (nil = none).
+    public func setSeedingLimits(ratio: Double?, time: TimeInterval?) async {
+        configuration.seedRatioLimit = ratio
+        configuration.seedTimeLimit = time
+        for controller in controllers.values {
+            await controller.setSeedingLimits(ratio: ratio, time: time)
+        }
+    }
+
     /// Re-adds every persisted torrent (call once at startup).
     public func restore() async {
         guard let persistence else { return }
@@ -87,7 +138,8 @@ public actor TorrentSession {
                 announceTiers: meta.announceTiers,
                 downloadDirectory: directory,
                 resume: entry.resume,
-                persistTorrentData: nil
+                persistTorrentData: nil,
+                webSeeds: meta.webSeeds
             )
         }
     }
@@ -109,7 +161,8 @@ public actor TorrentSession {
             sequential: sequential,
             wantedFiles: wantedFiles,
             resume: nil,
-            persistTorrentData: fileData
+            persistTorrentData: fileData,
+            webSeeds: meta.webSeeds
         )
     }
 
@@ -120,13 +173,18 @@ public actor TorrentSession {
         sequential: Bool? = nil,
         wantedFiles: Set<Int>? = nil,
         resume: ResumeData? = nil,
-        persistTorrentData: Data? = nil
+        persistTorrentData: Data? = nil,
+        webSeeds: [String] = []
     ) async throws -> InfoHash {
         guard controllers[info.infoHash] == nil else { throw SessionError.duplicateTorrent }
         var config = ControllerConfig()
         config.maxPeers = configuration.maxPeersPerTorrent
         config.listenPort = configuration.listenPort
         config.sequential = sequential ?? configuration.sequentialDownload
+        config.pexIntervalSeconds = configuration.pexIntervalSeconds
+        config.encryptionPolicy = configuration.encryptionPolicy
+        config.seedRatioLimit = configuration.seedRatioLimit
+        config.seedTimeLimit = configuration.seedTimeLimit
         let controller = TorrentController(
             info: info,
             announceTiers: announceTiers,
@@ -137,7 +195,8 @@ public actor TorrentSession {
             initialResume: resume,
             wantedFiles: wantedFiles,
             downloadLimiter: downloadLimiter,
-            uploadLimiter: uploadLimiter
+            uploadLimiter: uploadLimiter,
+            webSeeds: webSeeds
         )
         controllers[info.infoHash] = controller
         order.append(info.infoHash)
@@ -150,8 +209,70 @@ public actor TorrentSession {
                 Task { await dht.addCandidate(address) }
             }
         }
+        await controller.setOnBecameSeed { [weak self] in
+            await self?.rescheduleQueue()
+        }
+        persistOrder()
         await controller.start()
+        await rescheduleQueue()
         return info.infoHash
+    }
+
+    /// Keeps at most `maxActiveDownloads` torrents actively downloading (in
+    /// `order`); the rest wait in `.queued`. Completed (seeding) torrents are
+    /// unaffected.
+    private func rescheduleQueue() async {
+        let cap = configuration.maxActiveDownloads ?? 0
+        var managed: [TorrentController] = []
+        for hash in order {
+            guard let controller = controllers[hash] else { continue }
+            let state = await controller.currentState
+            if state == .downloading || state == .queued {
+                managed.append(controller)
+            }
+        }
+        for (index, controller) in managed.enumerated() {
+            if cap == 0 || index < cap {
+                await controller.startFromQueue()
+            } else {
+                await controller.moveToQueue()
+            }
+        }
+    }
+
+    /// Updates the active-download cap and reschedules (nil/0 = unlimited).
+    public func setMaxActiveDownloads(_ limit: Int?) async {
+        configuration.maxActiveDownloads = limit
+        await rescheduleQueue()
+    }
+
+    /// Directions for reordering a torrent within the queue.
+    public enum QueueMove: Sendable {
+        case up, down, top, bottom
+    }
+
+    /// Moves a torrent within the list order — which is also download
+    /// priority when an active-download cap is set — then reschedules.
+    public func moveTorrent(_ infoHash: InfoHash, _ move: QueueMove) async throws {
+        guard let index = order.firstIndex(of: infoHash) else {
+            throw SessionError.unknownTorrent
+        }
+        let target: Int = switch move {
+        case .up: max(0, index - 1)
+        case .down: min(order.count - 1, index + 1)
+        case .top: 0
+        case .bottom: order.count - 1
+        }
+        guard target != index else { return }
+        order.remove(at: index)
+        order.insert(infoHash, at: target)
+        persistOrder()
+        await rescheduleQueue()
+    }
+
+    /// Saves the current list order so queue priority survives restarts.
+    private func persistOrder() {
+        persistence?.saveQueueOrder(order.map(\.hexString))
     }
 
     // MARK: - Magnets
@@ -175,6 +296,7 @@ public actor TorrentSession {
             listenPort: configuration.listenPort,
             downloadDirectory: downloadDirectory ?? configuration.downloadDirectory,
             sequential: sequential ?? configuration.sequentialDownload,
+            encryptionPolicy: configuration.encryptionPolicy,
             discoverPeers: discover
         ) { [weak self] infoData in
             await self?.metadataResolved(magnet: magnet, infoData: infoData)
@@ -252,6 +374,7 @@ public actor TorrentSession {
             listenPort: configuration.listenPort,
             downloadDirectory: configuration.downloadDirectory,
             sequential: configuration.sequentialDownload,
+            encryptionPolicy: configuration.encryptionPolicy,
             discoverPeers: makeDiscoverClosure(for: magnet.infoHash)
         )
         prefetches[magnet.infoHash] = controller
@@ -373,6 +496,18 @@ public actor TorrentSession {
         throw SessionError.unknownTorrent
     }
 
+    /// Live per-peer details for the inspector (empty for an unresolved magnet).
+    public func peerDetails(for infoHash: InfoHash) async -> [PeerDetail] {
+        guard let controller = controllers[infoHash] else { return [] }
+        return await controller.peerDetails()
+    }
+
+    /// Per-tracker status for the inspector (empty for an unresolved magnet).
+    public func trackerDetails(for infoHash: InfoHash) async -> [TrackerDetail] {
+        guard let controller = controllers[infoHash] else { return [] }
+        return await controller.trackerDetails()
+    }
+
     /// Restricts the download to the given file indices (must be non-empty).
     public func setWantedFiles(_ wanted: Set<Int>, for infoHash: InfoHash) async throws {
         guard let controller = controllers[infoHash] else {
@@ -397,28 +532,40 @@ public actor TorrentSession {
             await controller.deleteFiles()
         }
         persistence?.remove(for: infoHash)
+        persistOrder()
+        await rescheduleQueue()
+    }
+
+    /// Re-verifies a torrent's data on disk against its piece hashes.
+    public func recheckTorrent(_ infoHash: InfoHash) async throws {
+        guard let controller = controllers[infoHash] else { throw SessionError.unknownTorrent }
+        await controller.recheck()
     }
 
     public func pauseTorrent(_ infoHash: InfoHash) async throws {
         guard let controller = controllers[infoHash] else { throw SessionError.unknownTorrent }
         await controller.pause()
+        await rescheduleQueue()
     }
 
     public func resumeTorrent(_ infoHash: InfoHash) async throws {
         guard let controller = controllers[infoHash] else { throw SessionError.unknownTorrent }
         await controller.resumeActivity()
+        await rescheduleQueue()
     }
 
     public func pauseAll() async {
         for controller in controllers.values {
             await controller.pause()
         }
+        await rescheduleQueue()
     }
 
     public func resumeAll() async {
         for controller in controllers.values {
             await controller.resumeActivity()
         }
+        await rescheduleQueue()
     }
 
     /// Manually introduces peers (used by tests, DHT, and the UI).
@@ -463,9 +610,17 @@ public actor TorrentSession {
         return result
     }
 
+    /// Router port-mapping status (NAT-PMP), for display.
+    public func portMappingStatus() async -> PortMappingStatus {
+        await portMapper.status()
+    }
+
     public func shutdown() async {
         listener?.cancel()
         listener = nil
+        await portMapper.stop()
+        lsdTask?.cancel()
+        await lsd.stop()
         dhtTask?.cancel()
         await dht.stop()
         for magnet in magnets.values {
@@ -512,12 +667,52 @@ public actor TorrentSession {
         listener.start(queue: DispatchQueue(label: "torrent-listener"))
         self.listener = listener
 
+        if configuration.enablePortMapping {
+            await portMapper.start(internalPort: configuration.listenPort)
+        }
+
         if configuration.enableDHT {
             let statePath = configuration.stateDirectory?.appendingPathComponent("dht-nodes.json")
             try? await dht.start(port: configuration.listenPort, statePath: statePath)
             dhtTask = Task { await self.runDHTDiscovery() }
         }
+
+        if configuration.enableLSD {
+            try? await lsd.start { [weak self] address, hashes in
+                Task { await self?.lsdDiscovered(address, hashes) }
+            }
+            lsdTask = Task { await self.runLSDAnnounce() }
+        }
         return configuration.listenPort
+    }
+
+    /// Info hashes of active, non-private torrents (LSD/PEX-eligible).
+    private func publicActiveHashes() async -> [InfoHash] {
+        var hashes: [InfoHash] = []
+        for (hash, controller) in controllers where !controller.info.isPrivate {
+            let state = await controller.currentState
+            if state == .downloading || state == .seeding { hashes.append(hash) }
+        }
+        return hashes
+    }
+
+    private func runLSDAnnounce() async {
+        try? await Task.sleep(for: .seconds(2))
+        while !Task.isCancelled {
+            let hashes = await publicActiveHashes()
+            if !hashes.isEmpty {
+                await lsd.announce(port: configuration.listenPort, infoHashes: hashes)
+            }
+            // BEP 14 suggests re-announcing on a slow cadence.
+            try? await Task.sleep(for: .seconds(300))
+        }
+    }
+
+    private func lsdDiscovered(_ address: PeerAddress, _ hashes: [InfoHash]) async {
+        for hash in hashes {
+            guard let controller = controllers[hash], !controller.info.isPrivate else { continue }
+            await controller.addKnownPeers([address])
+        }
     }
 
     /// Periodically asks the DHT for peers for every active public torrent
@@ -542,7 +737,35 @@ public actor TorrentSession {
         let connection = PeerConnection(incoming: rawConnection)
         do {
             try await connection.start()
-            let handshake = try await connection.receiveHandshake()
+            let policy = configuration.encryptionPolicy
+            // A plaintext BT handshake starts with 0x13 "BitTorrent protocol";
+            // anything else from an encryption-capable setup is an MSE DH key.
+            let prefix = try await connection.receiveRawBytes(20)
+            let plaintextPrefix = Data([19] + Array("BitTorrent protocol".utf8))
+
+            let handshake: Handshake
+            if prefix == plaintextPrefix {
+                guard policy != .required else {
+                    throw PeerWireError.handshakeFailed("plaintext peer refused")
+                }
+                let rest = try await connection.receiveRawBytes(Handshake.length - 20)
+                handshake = try Handshake.decode(prefix + rest)
+            } else {
+                guard policy != .disabled else {
+                    throw PeerWireError.handshakeFailed("encryption disabled")
+                }
+                let (infoHash, _) = try await connection.mseResponderHandshake(
+                    prefix: prefix,
+                    infoHashes: Array(controllers.keys),
+                    allowPlaintext: policy != .required
+                )
+                // The BT handshake follows on the negotiated stream.
+                handshake = try await connection.receiveHandshake()
+                guard handshake.infoHash == infoHash else {
+                    throw PeerWireError.handshakeFailed("MSE torrent mismatch")
+                }
+            }
+
             guard let controller = controllers[handshake.infoHash] else {
                 throw PeerWireError.handshakeFailed("unknown torrent")
             }

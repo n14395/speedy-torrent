@@ -10,6 +10,9 @@ public actor TrackerManager {
     /// Last error message per tracker URL (for UI display).
     public private(set) var lastErrors: [String: String] = [:]
     public private(set) var lastSuccess: [String: Date] = [:]
+    /// Swarm counts reported by each tracker's most recent successful announce.
+    public private(set) var lastSeeders: [String: Int] = [:]
+    public private(set) var lastLeechers: [String: Int] = [:]
 
     public init(tiers: [[String]]) {
         self.tiers = tiers.map { $0.shuffled() }
@@ -31,6 +34,8 @@ public actor TrackerManager {
                     tiers[tierIndex].insert(url, at: 0)
                     lastErrors[url] = nil
                     lastSuccess[url] = Date()
+                    if let seeders = response.seeders { lastSeeders[url] = seeders }
+                    if let leechers = response.leechers { lastLeechers[url] = leechers }
                     return response
                 } catch {
                     lastError = error
