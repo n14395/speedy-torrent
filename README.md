@@ -1,99 +1,159 @@
 # SpeedyTorrent
 
-A simple, reliable BitTorrent client for macOS, written entirely in Swift — the
-protocol engine has zero third-party dependencies.
+A fast, reliable BitTorrent client for macOS, written entirely in Swift.
+The protocol engine is built from scratch with **zero third-party
+dependencies** — no libtorrent, no bundled daemon, just Swift concurrency and
+Apple's system frameworks.
 
 ![status](https://img.shields.io/badge/status-v0.1-blue)
+![platform](https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey)
+![swift](https://img.shields.io/badge/Swift-6-orange)
+![tests](https://img.shields.io/badge/tests-100%20passing-brightgreen)
 
-- **Downloads** from `.torrent` files and **magnet links** (BEP 9/10 metadata
-  exchange over a built-in mainline **DHT** node, BEP 5)
-- **HTTP(S) and UDP trackers** (BEP 3/15/12/23), compact + IPv6 peer lists
-- **Seeds** with the classic tit-for-tat choke algorithm
-- **Fast resume** — verified pieces are remembered across launches; tampered
-  files are detected and re-checked
-- **Per-torrent settings** — download location (existing content is moved
-  safely when changed), sequential piece order, and **per-file selection**
-  (checkbox file tree with tri-state folders, name/size sorting; only wanted
-  files are downloaded, and files that share no data with any wanted file are
-  never even created on disk). Available both when adding a torrent and after.
-- **`.part` files** — in-progress files are written as `<name>.part` and
-  renamed to their final name the moment every piece covering them verifies,
-  so finished files are obvious at a glance
-- **Global speed limits**, defaults for new torrents in Settings,
-  per-torrent pause/resume
+## Features
+
+**Downloading**
+- `.torrent` files and **magnet links** — metadata is fetched in the
+  background the moment a magnet is opened, so the add dialog fills in the
+  name, size, and file list live, before you confirm
+- **Web seeds** (BEP 19): pieces are pulled from HTTP mirrors alongside the
+  swarm — well-mirrored content downloads even with zero peers
+- **Per-file selection** with a tri-state checkbox file tree (name/size
+  sorting); unwanted files that share no piece with a wanted file are never
+  even created on disk
+- **Sequential download** as a per-torrent option, for previewing media early
+- In-progress files carry a `.part` suffix and are renamed the instant every
+  piece covering them verifies
+
+**Swarm & network**
+- Built-in mainline **DHT** node (BEP 5) that answers queries from the
+  network, **peer exchange** (BEP 11), and **local peer discovery** (BEP 14)
+- HTTP(S) and UDP trackers (BEP 15) with tiered failover (BEP 12), compact
+  and IPv6 peer lists (BEP 23 / 7)
+- **Protocol encryption** (MSE/PE) — off / prefer / require — to reach
+  encryption-only peers and resist traffic shaping
+- **NAT-PMP port mapping** (PCP-compatible routers included) so peers can
+  reach you behind a home router, with live status in Settings
+- Classic tit-for-tat choking with optimistic unchoke while seeding
+
+**Managing**
+- **Queue**: cap concurrent active downloads; extra torrents wait in line, are
+  promoted automatically on completion, and can be reordered (order survives
+  restarts)
+- **Seeding goals**: stop seeding at a share ratio and/or after a time limit
+- **Fast resume** across launches; tampered files are detected and re-checked,
+  and a **Verify Data** action re-hashes on demand
+- Per-torrent download location — existing content is moved safely when
+  changed — plus global speed limits and per-torrent pause/resume
+- Sortable, searchable torrent list with status filters, and a status bar
+  showing totals, DHT size, port-mapping state, and encryption mode
+- **Inspector** panel: live peers (client, rates, flags, encryption), tracker
+  health per tier, per-file progress, and torrent info with one-click
+  **Copy Magnet Link**
+
+**macOS app**
 - Menu bar item with live transfer rates and pause/resume-all
 - Registered handler for `magnet:` links and `.torrent` files (drag-and-drop,
   Finder double-click, paste)
 - Download-complete notifications
 
-## Layout
+## Getting started
+
+Requires **macOS 15+**. Download a release DMG, drag the app to Applications,
+and on first launch right-click → **Open** (the app is ad-hoc signed, not
+notarized, so Gatekeeper warns once), or run:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/SpeedyTorrent.app
+```
+
+## Building from source
+
+Requires a Swift 6 toolchain. Two equivalent ways to build:
+
+**Xcode** — open `SpeedyTorrent.xcodeproj` and run the **SpeedyTorrent**
+scheme. The project is generated from `project.yml` with
+[XcodeGen](https://github.com/yonaskolb/XcodeGen); after editing `project.yml`,
+run `xcodegen generate` to refresh it.
+
+**Command line** — plain SwiftPM, no Xcode project needed:
+
+```sh
+Scripts/test.sh    # run the full test suite
+Scripts/build.sh   # build dist/SpeedyTorrent.app + a distributable .dmg
+```
+
+The scripts prefer a full Xcode install (`/Applications/Xcode[-beta].app`) and
+fall back to Command Line Tools with the extra flags CLT needs (Swift Testing
+rpaths/plugin path, pinned SDK).
+
+### CLI harness
+
+`storrent` exercises the engine without the UI — handy for scripting and
+debugging:
+
+```sh
+swift run storrent info something.torrent        # parse and print metainfo
+swift run storrent create <file-or-dir>          # make a .torrent
+swift run storrent announce something.torrent    # query trackers for peers
+swift run storrent download something.torrent ~/Downloads
+swift run storrent seed something.torrent <content-parent-dir>
+swift run storrent magnet "magnet:?xt=urn:btih:…"
+swift run storrent dht <40-hex-infohash>         # DHT peer lookup
+```
+
+## Architecture
+
+Two cleanly separated layers:
 
 | Path | What it is |
 |---|---|
-| `Sources/TorrentEngine` | The engine library: bencode, metainfo, trackers, peer wire, pieces, storage, DHT, session |
+| `Sources/TorrentEngine` | Actor-based engine library: bencode, metainfo, trackers, peer wire, MSE, pieces, storage, DHT, LSD, session |
 | `Sources/SpeedyTorrentApp` | SwiftUI app (window + menu bar + settings) |
-| `Sources/storrent` | CLI harness (`info`, `create`, `announce`, `download`, `seed`, `magnet`, `dht`) |
+| `Sources/storrent` | CLI harness |
 | `Tests/TorrentEngineTests` | Unit tests + loopback end-to-end suites |
-| `Scripts/` | build/test/bundle helpers |
 
-## Building
-
-Requires macOS 15+ and a Swift 6 toolchain. Two equivalent ways to build:
-
-**Xcode** — open `SpeedyTorrent.xcodeproj`, then build/run the **SpeedyTorrent**
-scheme (targets: the app, the `storrent` CLI, `TorrentEngine`, and tests). The
-project is generated from `project.yml` with [XcodeGen](https://github.com/yonaskolb/XcodeGen);
-after editing `project.yml`, run `xcodegen generate` to refresh it.
-
-**SwiftPM / command line** — no Xcode project needed:
-
-```sh
-Scripts/test.sh        # run the full test suite
-Scripts/bundle.sh      # build dist/SpeedyTorrent.app (release, ad-hoc signed)
-```
-
-The scripts prefer a full Xcode install (`/Applications/Xcode[-beta].app`),
-where plain `swift build` / `swift test` just work. With Command Line Tools
-only, they fall back to the flags CLT needs: rpaths and a `-plugin-path` for
-Swift Testing, and `SDKROOT` pinned to the bundled 26.5 SDK (the macOS 27 beta
-SDK's SwiftUI macros require a plugin CLT doesn't ship).
-
-For ad-hoc engine work:
-
-```sh
-swift build
-.build/…/storrent download something.torrent ~/Downloads
-.build/…/storrent magnet "magnet:?xt=urn:btih:…"
-```
-
-## Architecture notes
-
-Everything is actor-based Swift concurrency; the engine never touches AppKit.
-`TorrentSession` is the single public entry point — the app consumes 1 Hz
-value-type `TorrentSnapshot`s and calls intent methods (`addTorrent`,
-`addMagnet`, `pauseTorrent`, …).
+The engine never imports AppKit. `TorrentSession` is the single public entry
+point: the app consumes 1 Hz value-type `TorrentSnapshot`s and calls intent
+methods (`addTorrent`, `commitMagnet`, `pauseTorrent`, …).
 
 Reliability decisions worth knowing about:
 
 - Info-hashes are computed over the *original* bencoded bytes (never
   re-encoded), with byte ranges tracked by the decoder.
-- Every piece is SHA-1 verified before it touches its final location; peers
-  contributing to two corrupt pieces are banned.
+- Every piece is SHA-1 verified before it is written — whether it came from a
+  peer or a web seed; peers contributing to two corrupt pieces are banned.
 - File paths from metadata are sanitized against directory traversal.
-- Resume data is only trusted if file modification times are unchanged;
+- Resume data is trusted only if file modification times are unchanged;
   otherwise the torrent is silently re-checked.
-- The DHT node answers queries from the network (ping/find_node/get_peers/
-  announce_peer with rotating tokens), so the client is a good citizen.
+- DHT, PEX, and LSD are all disabled for torrents marked `private`.
 
-## Not in v1
+## Testing
 
-BitTorrent v2 (BEP 52), encryption (MSE/PE), uTP, PEX, UPnP/NAT-PMP port
-mapping, App Store sandboxing. The module boundaries leave room for all of
-them.
+```sh
+Scripts/test.sh
+```
+
+100 tests cover the codecs (bencode, KRPC, PEX, NAT-PMP, LSD, MSE crypto
+against known vectors) and, more importantly, real end-to-end behavior:
+loopback swarms download, seed, resume, re-check, queue, encrypt, exchange
+peers, and fetch from a local HTTP web seed — over real sockets, with byte-for-
+byte payload verification. The client has also been verified against the
+Debian netinst image by `.torrent` and by trackerless magnet, checksums
+matching.
+
+## Protocol support
+
+BEP 3 (peer wire), 5 (DHT), 7 (IPv6 peers), 9 (metadata exchange),
+10 (extension protocol), 11 (PEX), 12 (tracker tiers), 14 (LSD),
+15 (UDP trackers), 19 (web seeds), 20 (peer IDs), 23 (compact peers),
+plus MSE/PE stream encryption.
+
+Not yet: BitTorrent v2 (BEP 52), uTP, UPnP-IGD (NAT-PMP covers most home
+routers), per-file priorities beyond on/off, App Store sandboxing. The module
+boundaries leave room for all of them.
 
 ## Note
 
-Use it for content you have the right to download and share — Linux ISOs are
-the canonical test material (this client was verified end-to-end against the
-Debian netinst image, by .torrent and by trackerless magnet, checksums
-matching).
+Use SpeedyTorrent for content you have the right to download and share —
+Linux ISOs are the canonical test material.
