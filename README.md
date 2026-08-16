@@ -8,7 +8,7 @@ Apple's system frameworks.
 ![status](https://img.shields.io/badge/status-v0.1-blue)
 ![platform](https://img.shields.io/badge/platform-macOS%2015%2B-lightgrey)
 ![swift](https://img.shields.io/badge/Swift-6-orange)
-![tests](https://img.shields.io/badge/tests-100%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-101%20passing-brightgreen)
 
 ## Features
 
@@ -47,12 +47,15 @@ Apple's system frameworks.
   changed — plus global speed limits and per-torrent pause/resume
 - Sortable, searchable torrent list with status filters, and a status bar
   showing totals, DHT size, port-mapping state, and encryption mode
-- **Inspector** panel: live peers (client, rates, flags, encryption), tracker
-  health per tier, per-file progress, and torrent info with one-click
-  **Copy Magnet Link**
+- **Inspector** panel: a live per-torrent **speed graph**, peers (client,
+  rates, flags, encryption), tracker health per tier, per-file progress, and
+  torrent info with one-click **Copy Magnet Link**
+- **Statistics** window: aggregate transfer graph plus session and all-time
+  downloaded/uploaded/ratio counters, persisted across launches
 
 **macOS app**
 - Menu bar item with live transfer rates and pause/resume-all
+- Dock icon shows aggregate download progress while anything is downloading
 - Registered handler for `magnet:` links and `.torrent` files (drag-and-drop,
   Finder double-click, paste)
 - Download-complete notifications
@@ -134,7 +137,7 @@ Reliability decisions worth knowing about:
 Scripts/test.sh
 ```
 
-100 tests cover the codecs (bencode, KRPC, PEX, NAT-PMP, LSD, MSE crypto
+101 tests cover the codecs (bencode, KRPC, PEX, NAT-PMP, LSD, MSE crypto
 against known vectors) and, more importantly, real end-to-end behavior:
 loopback swarms download, seed, resume, re-check, queue, encrypt, exchange
 peers, and fetch from a local HTTP web seed — over real sockets, with byte-for-

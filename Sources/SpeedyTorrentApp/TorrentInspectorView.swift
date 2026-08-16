@@ -81,6 +81,16 @@ struct TorrentInspectorView: View {
         Group {
             if let snapshot {
                 Form {
+                    Section("Speed") {
+                        VStack(spacing: 6) {
+                            RateChart(samples: store.rateHistory[infoHash] ?? [])
+                                .frame(height: 92)
+                            RateChartLegend(
+                                download: snapshot.downloadRate,
+                                upload: snapshot.uploadRate
+                            )
+                        }
+                    }
                     Section("Torrent") {
                         infoRow("Name", snapshot.name)
                         infoRow("Info hash", snapshot.infoHash.hexString, monospaced: true)

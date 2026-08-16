@@ -31,6 +31,7 @@ enum StatusFilter: String, CaseIterable, Identifiable {
 
 struct TorrentListView: View {
     @Environment(SessionStore.self) private var store
+    @Environment(\.openWindow) private var openWindow
     @State private var selection: Set<InfoHash> = []
     @State private var showingFileImporter = false
     @State private var showingMagnetSheet = false
@@ -38,20 +39,32 @@ struct TorrentListView: View {
     @State private var pendingRemoval: [TorrentSnapshot] = []
     @State private var editingTorrent: TorrentSnapshot?
     @State private var showInspector = false
-    @State private var sortOrder: [KeyPathComparator<TorrentSnapshot>] = []
+    @State private var sortOrder: [KeyPathComparator<TorrentSnapshot>] =
+        [KeyPathComparator(\.queuePosition)]
     @State private var searchText = ""
     @State private var statusFilter: StatusFilter = .all
     /// Bumped once after launch to re-create toolbar buttons (see workaround).
     @State private var toolbarRefresh = 0
 
-    /// Snapshots after search + status filter + column sort. An empty
-    /// `sortOrder` keeps the engine's manual (queue) order.
+    /// True while the table shows the engine's queue order — the default "#"
+    /// ascending sort (or no sort at all) — the only mode where the rows can
+    /// be reordered.
+    private var isQueueOrdered: Bool {
+        sortOrder.isEmpty || (
+            sortOrder.count == 1
+                && sortOrder[0].keyPath == \TorrentSnapshot.queuePosition
+                && sortOrder[0].order == .forward
+        )
+    }
+
+    /// Snapshots after search + status filter + column sort. In queue order
+    /// the engine's own ordering passes through untouched.
     private var displayedSnapshots: [TorrentSnapshot] {
         var rows = store.snapshots.filter { statusFilter.matches($0) }
         if !searchText.isEmpty {
             rows = rows.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
         }
-        if !sortOrder.isEmpty {
+        if !isQueueOrdered {
             rows.sort(using: sortOrder)
         }
         return rows
@@ -183,6 +196,14 @@ struct TorrentListView: View {
 
     private var table: some View {
         Table(displayedSnapshots, selection: $selection, sortOrder: $sortOrder) {
+            TableColumn("#", value: \.queuePosition) { snapshot in
+                Text("\(snapshot.queuePosition)")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .width(min: 26, ideal: 30, max: 44)
+
             TableColumn("Name", value: \.name) { snapshot in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(snapshot.name)
@@ -263,11 +284,11 @@ struct TorrentListView: View {
             .fixedSize()
             .help("Show only torrents in this state")
 
-            if !sortOrder.isEmpty {
-                Button("Manual Order") { sortOrder = [] }
+            if !isQueueOrdered {
+                Button("Queue Order") { sortOrder = [KeyPathComparator(\.queuePosition)] }
                     .buttonStyle(.link)
                     .font(.caption)
-                    .help("Return to queue order")
+                    .help("Return to queue-priority order")
             }
 
             Spacer()
@@ -296,6 +317,14 @@ struct TorrentListView: View {
                     .help("Total download rate")
                 Label(formatRate(store.totalUploadRate), systemImage: "arrow.up")
                     .help("Total upload rate")
+
+                Button {
+                    openWindow(id: "stats")
+                } label: {
+                    Image(systemName: "chart.xyaxis.line")
+                }
+                .buttonStyle(.borderless)
+                .help("Transfer statistics")
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -338,8 +367,8 @@ struct TorrentListView: View {
             if selected.count == 1 {
                 Button("Settings…") { editingTorrent = selected[0] }
             }
-            // Reordering is only meaningful in the manual (queue) order.
-            if selected.count == 1, sortOrder.isEmpty, searchText.isEmpty, statusFilter == .all {
+            // Reordering is only meaningful in the queue-priority order.
+            if selected.count == 1, isQueueOrdered, searchText.isEmpty, statusFilter == .all {
                 let hash = selected[0].infoHash
                 let index = store.snapshots.firstIndex { $0.infoHash == hash } ?? 0
                 Menu("Move") {

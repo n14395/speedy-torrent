@@ -84,6 +84,9 @@ public struct TorrentSnapshot: Sendable, Identifiable {
     public let addedAt: Double
     /// Piece size in bytes (0 while metadata is unknown).
     public let pieceLength: Int
+    /// 1-based position in the session's queue (= download priority); 0 for
+    /// snapshots taken outside a session's ordered listing.
+    public var queuePosition: Int = 0
 
     public var progress: Double {
         wantedLength > 0 ? Double(completedLength) / Double(wantedLength) : 0

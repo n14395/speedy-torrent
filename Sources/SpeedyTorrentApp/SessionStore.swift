@@ -68,6 +68,12 @@ final class SessionStore {
     private(set) var startupError: String?
     private(set) var portMappingStatus: PortMappingStatus = .disabled
     private(set) var dhtNodeCount = 0
+    /// Session + all-time transfer counters (nil until the first poll).
+    private(set) var stats: SessionStatistics?
+    /// Rolling 1 Hz rate samples per torrent, for the inspector speed graph.
+    private(set) var rateHistory: [InfoHash: [RateSample]] = [:]
+    /// Aggregate rate samples across all torrents, for the Statistics window.
+    private(set) var totalRateHistory: [RateSample] = []
     /// The encryption policy the session was started with (status-bar display).
     private(set) var activeEncryptionPolicy: EncryptionPolicy = .preferred
     var lastActionError: String?
@@ -145,12 +151,68 @@ final class SessionStore {
                 if !NSApplication.shared.isActive || NSEvent.pressedMouseButtons == 0 {
                     self.snapshots = snaps
                 }
+                self.recordRateHistory(snaps)
+                self.updateDockTile(snaps)
                 await self.refreshPendingMetadata(session)
                 self.portMappingStatus = await session.portMappingStatus()
                 self.dhtNodeCount = await session.dhtNodeCount()
+                self.stats = await session.statistics()
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+    }
+
+    /// Appends one rate sample per torrent (and one aggregate), keeping a few
+    /// minutes of history; entries for removed torrents are pruned.
+    private func recordRateHistory(_ snaps: [TorrentSnapshot]) {
+        let now = Date()
+        let cap = 180
+        for snap in snaps {
+            var samples = rateHistory[snap.infoHash, default: []]
+            samples.append(RateSample(time: now, download: snap.downloadRate, upload: snap.uploadRate))
+            if samples.count > cap { samples.removeFirst(samples.count - cap) }
+            rateHistory[snap.infoHash] = samples
+        }
+        totalRateHistory.append(RateSample(
+            time: now,
+            download: snaps.reduce(0) { $0 + $1.downloadRate },
+            upload: snaps.reduce(0) { $0 + $1.uploadRate }
+        ))
+        if totalRateHistory.count > cap {
+            totalRateHistory.removeFirst(totalRateHistory.count - cap)
+        }
+        if rateHistory.count > snaps.count {
+            let live = Set(snaps.map(\.infoHash))
+            rateHistory = rateHistory.filter { live.contains($0.key) }
+        }
+    }
+
+    // MARK: - Dock tile
+
+    private let dockProgressView = DockProgressView()
+
+    /// Overlays an aggregate progress bar on the Dock icon while anything is
+    /// downloading; restores the plain icon otherwise.
+    private func updateDockTile(_ snaps: [TorrentSnapshot]) {
+        let tile = NSApplication.shared.dockTile
+        let downloading = snaps.filter { $0.state == .downloading }
+        guard !downloading.isEmpty else {
+            if tile.contentView != nil {
+                tile.contentView = nil
+                tile.badgeLabel = nil
+                tile.display()
+            }
+            return
+        }
+        let wanted = downloading.reduce(Int64(0)) { $0 + $1.wantedLength }
+        let done = downloading.reduce(Int64(0)) { $0 + min($1.completedLength, $1.wantedLength) }
+        dockProgressView.progress = wanted > 0 ? Double(done) / Double(wanted) : 0
+        if tile.contentView !== dockProgressView {
+            dockProgressView.frame = NSRect(origin: .zero, size: tile.size)
+            tile.contentView = dockProgressView
+        }
+        tile.badgeLabel = downloading.count > 1 ? "\(downloading.count)" : nil
+        tile.display()
     }
 
     /// Fills in a magnet's metadata (name/size/files) on its pending-add row
@@ -440,6 +502,7 @@ final class SessionStore {
 func formatBytes(_ bytes: Int64) -> String {
     let formatter = ByteCountFormatter()
     formatter.countStyle = .binary
+    formatter.allowsNonnumericFormatting = false // "0 bytes", not "Zero KB"
     return formatter.string(fromByteCount: bytes)
 }
 
@@ -491,4 +554,44 @@ extension TorrentState {
         case .paused, .queued: .secondary
         }
     }
+}
+
+/// One 1 Hz sample of transfer rates, for the speed graphs.
+struct RateSample: Identifiable {
+    var id: Date { time }
+    let time: Date
+    let download: Double
+    let upload: Double
+}
+
+/// The app icon with a progress bar along the bottom, drawn into the Dock
+/// tile while downloads are active.
+final class DockProgressView: NSView {
+    var progress: Double = 0
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSApplication.shared.applicationIconImage?.draw(in: bounds)
+        let barHeight = bounds.height * 0.085
+        let inset = bounds.width * 0.14
+        let bar = NSRect(
+            x: inset, y: bounds.height * 0.055,
+            width: bounds.width - inset * 2, height: barHeight
+        )
+        let radius = barHeight / 2
+        NSColor.black.withAlphaComponent(0.6).setFill()
+        NSBezierPath(roundedRect: bar.insetBy(dx: -1.5, dy: -1.5), xRadius: radius, yRadius: radius).fill()
+        NSColor.white.withAlphaComponent(0.35).setFill()
+        NSBezierPath(roundedRect: bar, xRadius: radius, yRadius: radius).fill()
+        var fill = bar
+        fill.size.width = max(barHeight, bar.width * min(1, max(0, progress)))
+        NSColor.controlAccentColor.setFill()
+        NSBezierPath(roundedRect: fill, xRadius: radius, yRadius: radius).fill()
+    }
+}
+
+/// Compact duration like "3m 20s", "2h 5m", or "1d 4h".
+func formatDuration(_ seconds: TimeInterval) -> String {
+    Duration.seconds(max(0, seconds)).formatted(
+        .units(allowed: [.days, .hours, .minutes, .seconds], width: .narrow, maximumUnitCount: 2)
+    )
 }

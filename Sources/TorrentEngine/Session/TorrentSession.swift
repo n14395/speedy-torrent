@@ -104,11 +104,26 @@ public actor TorrentSession {
     private let lsd = LSDService()
     private var lsdTask: Task<Void, Never>?
 
+    // Global transfer statistics: per-torrent baselines let session counters
+    // accumulate deltas without double-counting totals restored from disk.
+    private var statsBase = StatsFile()
+    private var sessionDownloaded: Int64 = 0
+    private var sessionUploaded: Int64 = 0
+    private var statsBaselines: [InfoHash: (downloaded: Int64, uploaded: Int64)] = [:]
+    private let sessionStart = Date()
+    private var lastStatsSave = Date()
+
     public init(configuration: Configuration) {
         self.configuration = configuration
         self.persistence = configuration.stateDirectory.map(PersistenceStore.init(baseURL:))
         self.downloadLimiter = RateLimiter(bytesPerSecond: configuration.downloadRateLimit)
         self.uploadLimiter = RateLimiter(bytesPerSecond: configuration.uploadRateLimit)
+        if let persistence {
+            var base = persistence.loadStats()
+            base.launches += 1
+            statsBase = base
+            persistence.saveStats(base)
+        }
     }
 
     public func setRateLimits(download: Int?, upload: Int?) async {
@@ -200,6 +215,10 @@ public actor TorrentSession {
         )
         controllers[info.infoHash] = controller
         order.append(info.infoHash)
+        // Baseline the stats counters now (not at first observation): totals
+        // restored from disk must not count into this session, but everything
+        // transferred from here on must — even before the first snapshot.
+        statsBaselines[info.infoHash] = (resume?.downloaded ?? 0, resume?.uploaded ?? 0)
         if let persistTorrentData, let persistence {
             persistence.saveTorrentData(persistTorrentData, for: info.infoHash)
         }
@@ -519,6 +538,7 @@ public actor TorrentSession {
     public func removeTorrent(_ infoHash: InfoHash, deleteFiles: Bool = false) async throws {
         if let magnet = magnets.removeValue(forKey: infoHash) {
             order.removeAll { $0 == infoHash }
+            statsBaselines[infoHash] = nil
             await magnet.stop()
             persistence?.remove(for: infoHash)
             return
@@ -527,6 +547,10 @@ public actor TorrentSession {
             throw SessionError.unknownTorrent
         }
         order.removeAll { $0 == infoHash }
+        // Fold the torrent's final transfer into the global counters before
+        // its baseline disappears.
+        accumulateStats([await controller.snapshot()])
+        statsBaselines[infoHash] = nil
         await controller.stop()
         if deleteFiles {
             await controller.deleteFiles()
@@ -607,7 +631,61 @@ public actor TorrentSession {
                 result.append(await magnet.snapshot())
             }
         }
+        for index in result.indices {
+            result[index].queuePosition = index + 1
+        }
+        accumulateStats(result)
+        if Date().timeIntervalSince(lastStatsSave) > 60 {
+            persistStats()
+        }
         return result
+    }
+
+    // MARK: - Statistics
+
+    /// Global transfer counters for this session and all-time (persisted).
+    public func statistics() async -> SessionStatistics {
+        // Fold in any transfer since the last snapshots() call.
+        var current: [TorrentSnapshot] = []
+        for controller in controllers.values {
+            current.append(await controller.snapshot())
+        }
+        accumulateStats(current)
+        let uptime = Date().timeIntervalSince(sessionStart)
+        return SessionStatistics(
+            sessionDownloaded: sessionDownloaded,
+            sessionUploaded: sessionUploaded,
+            sessionDuration: uptime,
+            allTimeDownloaded: statsBase.downloaded + sessionDownloaded,
+            allTimeUploaded: statsBase.uploaded + sessionUploaded,
+            allTimeUptime: statsBase.uptime + uptime,
+            launchCount: statsBase.launches
+        )
+    }
+
+    /// Advances the session counters by each torrent's transfer since it was
+    /// last observed. The first observation only seeds the baseline, so
+    /// totals restored from resume data are never counted twice.
+    private func accumulateStats(_ snapshots: [TorrentSnapshot]) {
+        for snapshot in snapshots {
+            let baseline = statsBaselines[snapshot.infoHash]
+                ?? (snapshot.downloadedTotal, snapshot.uploadedTotal)
+            sessionDownloaded += max(0, snapshot.downloadedTotal - baseline.downloaded)
+            sessionUploaded += max(0, snapshot.uploadedTotal - baseline.uploaded)
+            statsBaselines[snapshot.infoHash] = (snapshot.downloadedTotal, snapshot.uploadedTotal)
+        }
+    }
+
+    /// Writes all-time counters as (loaded base) + (session so far); the base
+    /// never changes while running, so repeated saves are idempotent.
+    private func persistStats() {
+        guard let persistence else { return }
+        var file = statsBase
+        file.downloaded += sessionDownloaded
+        file.uploaded += sessionUploaded
+        file.uptime += Date().timeIntervalSince(sessionStart)
+        persistence.saveStats(file)
+        lastStatsSave = Date()
     }
 
     /// Router port-mapping status (NAT-PMP), for display.
@@ -632,8 +710,10 @@ public actor TorrentSession {
         }
         prefetches.removeAll()
         for controller in controllers.values {
+            accumulateStats([await controller.snapshot()])
             await controller.stop()
         }
+        persistStats()
         controllers.removeAll()
         order.removeAll()
     }

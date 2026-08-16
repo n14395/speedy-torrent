@@ -30,6 +30,12 @@ struct SpeedyTorrentApp: App {
                 }
         }
 
+        Window("Statistics", id: "stats") {
+            StatisticsView()
+                .environment(store)
+        }
+        .windowResizability(.contentSize)
+
         MenuBarExtra {
             MenuBarView()
                 .environment(store)

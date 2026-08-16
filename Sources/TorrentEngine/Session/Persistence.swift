@@ -51,6 +51,17 @@ struct PersistenceStore: Sendable {
         try? FileManager.default.removeItem(at: directory(for: infoHash))
     }
 
+    func saveStats(_ stats: StatsFile) {
+        if let encoded = try? JSONEncoder().encode(stats) {
+            try? encoded.write(to: baseURL.appendingPathComponent("stats.json"))
+        }
+    }
+
+    func loadStats() -> StatsFile {
+        (try? Data(contentsOf: baseURL.appendingPathComponent("stats.json")))
+            .flatMap { try? JSONDecoder().decode(StatsFile.self, from: $0) } ?? StatsFile()
+    }
+
     /// Persists the list order (= queue priority) as hex hashes.
     func saveQueueOrder(_ hexHashes: [String]) {
         if let encoded = try? JSONEncoder().encode(hexHashes) {
