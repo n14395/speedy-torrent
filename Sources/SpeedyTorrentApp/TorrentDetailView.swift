@@ -158,16 +158,23 @@ struct TorrentDetailView: View {
 
     private var filesTab: some View {
         VStack(alignment: .leading, spacing: 10) {
-            fileTree
-                .frame(maxHeight: .infinity)
-                .background(Surface.fill)
-                .clipShape(.rect(cornerRadius: Surface.corner))
-
-            // Where this torrent downloads — one line, pinned below the list
-            // so the files get every spare point of height.
+            // Where and how this torrent downloads, above the list it governs.
+            // A card each rather than two rows of one: they are unrelated
+            // settings, and the gap says so more clearly than a hairline.
             locationRow
                 .padding(.horizontal, 12)
                 .frame(height: 30)
+                .background(Surface.fill)
+                .clipShape(.rect(cornerRadius: Surface.corner))
+
+            sequentialToggle
+                .padding(.horizontal, 12)
+                .frame(height: 32)
+                .background(Surface.fill)
+                .clipShape(.rect(cornerRadius: Surface.corner))
+
+            fileTree
+                .frame(maxHeight: .infinity)
                 .background(Surface.fill)
                 .clipShape(.rect(cornerRadius: Surface.corner))
         }
@@ -226,7 +233,19 @@ struct TorrentDetailView: View {
                 : "Where this torrent's files are saved")
     }
 
+    /// An iOS-style switch in the panel's blue — the checkbox this used to be
+    /// disappeared against the card.
     private var sequentialToggle: some View {
+        HStack(spacing: 8) {
+            Text("Sequential download")
+                .font(.system(size: 12))
+            Spacer(minLength: 8)
+            sequentialSwitch.surfaceSwitch()
+        }
+        .help("Download pieces in file order — useful for previewing media early.")
+    }
+
+    private var sequentialSwitch: some View {
         Toggle("Sequential download", isOn: Binding(
             get: { snapshot?.sequential ?? pending?.sequential ?? false },
             set: { newValue in
@@ -236,7 +255,6 @@ struct TorrentDetailView: View {
                 }
             }
         ))
-        .help("Download pieces in file order — useful for previewing media early.")
     }
 
     @ViewBuilder
@@ -358,76 +376,80 @@ struct TorrentDetailView: View {
     }
 
     private func liveInfo(_ snapshot: TorrentSnapshot) -> some View {
-        Form {
-            Section {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
                 copyMagnetButton(hash: snapshot.infoHash.hexString, name: snapshot.name)
-            }
-            // The Files tab's footer is one line in the design, so this
-            // per-torrent setting lives with the torrent's other settings.
-            Section("Download") {
-                sequentialToggle
-            }
-            Section("Speed") {
-                VStack(spacing: 6) {
-                    RateChart(samples: store.rateHistory[snapshot.infoHash] ?? [])
-                        .frame(height: 92)
-                    RateChartLegend(
-                        download: snapshot.downloadRate,
-                        upload: snapshot.uploadRate
-                    )
+
+                SurfaceSection(title: "Speed") {
+                    VStack(spacing: 6) {
+                        RateChart(samples: store.rateHistory[snapshot.infoHash] ?? [])
+                            .frame(height: 92)
+                        RateChartLegend(
+                            download: snapshot.downloadRate,
+                            upload: snapshot.uploadRate
+                        )
+                    }
+                    .padding(12)
+                }
+
+                SurfaceSection(title: "Torrent") {
+                    SurfaceRow("Name", snapshot.name)
+                    SurfaceSeparator()
+                    SurfaceRow("Info hash", snapshot.infoHash.hexString, monospaced: true)
+                    SurfaceSeparator()
+                    SurfaceRow("Size", snapshot.totalLength > 0 ? formatBytes(snapshot.totalLength) : "—")
+                    if snapshot.pieceCount > 0 {
+                        SurfaceSeparator()
+                        SurfaceRow("Pieces", "\(snapshot.pieceCount) × \(formatBytes(Int64(snapshot.pieceLength)))")
+                    }
+                    if snapshot.addedAt > 0 {
+                        SurfaceSeparator()
+                        SurfaceRow("Added", Date(timeIntervalSince1970: snapshot.addedAt)
+                            .formatted(date: .abbreviated, time: .shortened))
+                    }
+                }
+
+                SurfaceSection(title: "Transfer") {
+                    SurfaceRow("State", snapshot.state.displayName)
+                    SurfaceSeparator()
+                    SurfaceRow("Downloaded", formatBytes(snapshot.downloadedTotal))
+                    SurfaceSeparator()
+                    SurfaceRow("Uploaded", formatBytes(snapshot.uploadedTotal))
+                    SurfaceSeparator()
+                    SurfaceRow("Ratio", String(format: "%.2f", snapshot.ratio))
                 }
             }
-            Section("Torrent") {
-                infoRow("Name", snapshot.name)
-                infoRow("Info hash", snapshot.infoHash.hexString, monospaced: true)
-                infoRow("Size", snapshot.totalLength > 0 ? formatBytes(snapshot.totalLength) : "—")
-                if snapshot.pieceCount > 0 {
-                    infoRow(
-                        "Pieces",
-                        "\(snapshot.pieceCount) × \(formatBytes(Int64(snapshot.pieceLength)))"
-                    )
-                }
-                if snapshot.addedAt > 0 {
-                    infoRow(
-                        "Added",
-                        Date(timeIntervalSince1970: snapshot.addedAt)
-                            .formatted(date: .abbreviated, time: .shortened)
-                    )
-                }
-            }
-            Section("Transfer") {
-                infoRow("State", snapshot.state.displayName)
-                infoRow("Downloaded", formatBytes(snapshot.downloadedTotal))
-                infoRow("Uploaded", formatBytes(snapshot.uploadedTotal))
-                infoRow("Ratio", String(format: "%.2f", snapshot.ratio))
-            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
         }
-        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
     }
 
     private func pendingInfo(_ pending: PendingTorrentAdd) -> some View {
-        Form {
-            if case .magnet(let uri) = pending.source {
-                Section {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if case .magnet(let uri) = pending.source {
                     copyButton(label: "Copy Magnet Link", value: uri)
                 }
-            }
-            // Same home as a live torrent's copy of this setting, so the add
-            // sheet and the inspector stay in step.
-            Section("Download") {
-                sequentialToggle
-            }
-            Section("Torrent") {
-                infoRow("Name", pending.displayName)
-                infoRow("Info hash", pending.infoHash.hexString, monospaced: true)
-                infoRow("Size", pending.totalSize.map(formatBytes) ?? "Unknown until metadata arrives")
-                infoRow("Source", pending.isMagnet ? "Magnet link" : "Torrent file")
-                if !pending.files.isEmpty {
-                    infoRow("Files", "\(pending.wantedFiles.count) of \(pending.files.count) selected")
+
+                SurfaceSection(title: "Torrent") {
+                    SurfaceRow("Name", pending.displayName)
+                    SurfaceSeparator()
+                    SurfaceRow("Info hash", pending.infoHash.hexString, monospaced: true)
+                    SurfaceSeparator()
+                    SurfaceRow("Size", pending.totalSize.map(formatBytes) ?? "Unknown until metadata arrives")
+                    SurfaceSeparator()
+                    SurfaceRow("Source", pending.isMagnet ? "Magnet link" : "Torrent file")
+                    if !pending.files.isEmpty {
+                        SurfaceSeparator()
+                        SurfaceRow("Files", "\(pending.wantedFiles.count) of \(pending.files.count) selected")
+                    }
                 }
             }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 12)
         }
-        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
     }
 
     private func copyMagnetButton(hash: String, name: String) -> some View {
@@ -457,8 +479,13 @@ struct TorrentDetailView: View {
                 copiedMagnet ? "Copied!" : label,
                 systemImage: copiedMagnet ? "checkmark" : "link"
             )
+            .font(.system(size: 12, weight: .medium))
             .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(Surface.fill, in: .rect(cornerRadius: Surface.corner))
+            .contentShape(.rect)
         }
+        .buttonStyle(.plain)
         .help("Copy a magnet link for this torrent (info hash, name, and trackers)")
     }
 
@@ -482,36 +509,61 @@ struct TorrentDetailView: View {
             } else if peers.isEmpty {
                 emptyState("No connected peers")
             } else {
-                Table(peers) {
-                    TableColumn("Peer") { peer in
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(peer.address).lineLimit(1).truncationMode(.middle)
-                            Text(peerFlags(peer))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                ScrollView {
+                    SurfaceSection {
+                        ForEach(Array(peers.enumerated()), id: \.element.id) { index, peer in
+                            if index > 0 { SurfaceSeparator() }
+                            peerRow(peer)
                         }
                     }
-                    .width(min: 120, ideal: 150)
-                    TableColumn("Client") { Text($0.client).lineLimit(1) }
-                        .width(min: 80, ideal: 110)
-                    TableColumn("%") { peer in
-                        Text(peer.progress.formatted(.percent.precision(.fractionLength(0))))
-                            .monospacedDigit()
-                    }
-                    .width(44)
-                    TableColumn("↓") { Text(compactRate($0.downloadRate)).monospacedDigit() }
-                        .width(60)
-                    TableColumn("↑") { Text(compactRate($0.uploadRate)).monospacedDigit() }
-                        .width(60)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
                 }
+                .scrollContentBackground(.hidden)
             }
         }
+    }
+
+    private func peerRow(_ peer: PeerDetail) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(peer.address)
+                    .font(.system(size: 12))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(peer.client)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Text(peerFlags(peer))
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(peer.progress.formatted(.percent.precision(.fractionLength(0))))
+                    .font(.system(size: 12))
+                    .monospacedDigit()
+                HStack(spacing: 8) {
+                    Label(compactRate(peer.downloadRate), systemImage: "arrow.down")
+                        .foregroundStyle(peer.downloadRate >= 1024 ? AnyShapeStyle(Color.blue) : AnyShapeStyle(.tertiary))
+                    Label(compactRate(peer.uploadRate), systemImage: "arrow.up")
+                        .foregroundStyle(peer.uploadRate >= 1024 ? AnyShapeStyle(Color.green) : AnyShapeStyle(.tertiary))
+                }
+                .font(.system(size: 11))
+                .monospacedDigit()
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
     }
 
     private func peerFlags(_ peer: PeerDetail) -> String {
         var flags: [String] = []
         flags.append(peer.incoming ? "incoming" : "outgoing")
-        if peer.encrypted { flags.append("🔒 encrypted") }
+        if peer.encrypted { flags.append("encrypted") }
         if peer.isSeed { flags.append("seed") }
         if peer.interestedInPeer, !peer.peerChokingUs { flags.append("downloading") }
         if peer.peerInterestedInUs, !peer.chokingPeer { flags.append("uploading") }
@@ -526,55 +578,82 @@ struct TorrentDetailView: View {
                 if pending.trackers.isEmpty {
                     emptyState("No trackers — peers will come from the DHT.")
                 } else {
-                    List(pending.trackers, id: \.self) { tracker in
-                        Text(tracker)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                            .font(.callout)
+                    ScrollView {
+                        SurfaceSection {
+                            ForEach(Array(pending.trackers.enumerated()), id: \.element) { index, tracker in
+                                if index > 0 { SurfaceSeparator() }
+                                Text(tracker)
+                                    .font(.system(size: 12))
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 9)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 12)
                     }
-                    .listStyle(.bordered)
+                    .scrollContentBackground(.hidden)
                 }
             } else if trackers.isEmpty {
                 emptyState("No trackers")
             } else {
-                Table(trackers) {
-                    TableColumn("Tracker") { tracker in
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(tracker.url).lineLimit(1).truncationMode(.middle)
-                            Text("Tier \(tracker.tier + 1)")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                ScrollView {
+                    SurfaceSection {
+                        ForEach(Array(trackers.enumerated()), id: \.element.id) { index, tracker in
+                            if index > 0 { SurfaceSeparator() }
+                            trackerRow(tracker)
                         }
                     }
-                    .width(min: 150, ideal: 220)
-                    TableColumn("Status") { tracker in
-                        trackerStatus(tracker)
-                    }
-                    .width(min: 90, ideal: 130)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
                 }
+                .scrollContentBackground(.hidden)
             }
         }
+    }
+
+    private func trackerRow(_ tracker: TrackerDetail) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(tracker.url)
+                    .font(.system(size: 12))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("Tier \(tracker.tier + 1)")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 8)
+            trackerStatus(tracker)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
     }
 
     @ViewBuilder
     private func trackerStatus(_ tracker: TrackerDetail) -> some View {
         if let error = tracker.lastError {
             Text(error)
+                .font(.system(size: 11))
                 .lineLimit(2)
+                .multilineTextAlignment(.trailing)
                 .foregroundStyle(.red)
                 .help(error)
         } else if tracker.seeders != nil || tracker.leechers != nil {
             HStack(spacing: 8) {
-                Label("\(tracker.seeders ?? 0)", systemImage: "arrow.up.circle")
+                Label("\(tracker.seeders ?? 0)", systemImage: "arrow.up")
                     .foregroundStyle(.green)
-                Label("\(tracker.leechers ?? 0)", systemImage: "arrow.down.circle")
+                Label("\(tracker.leechers ?? 0)", systemImage: "arrow.down")
                     .foregroundStyle(.secondary)
             }
+            .font(.system(size: 11))
             .monospacedDigit()
         } else if tracker.lastSuccess != nil {
-            Text("Working").foregroundStyle(.green)
+            Text("Working").font(.system(size: 11)).foregroundStyle(.green)
         } else {
-            Text("Waiting…").foregroundStyle(.secondary)
+            Text("Waiting…").font(.system(size: 11)).foregroundStyle(.secondary)
         }
     }
 

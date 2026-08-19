@@ -28,6 +28,18 @@ enum StatusFilter: String, CaseIterable, Identifiable {
         }
     }
 
+    /// What an empty list under this filter actually means — the search
+    /// field's "check the spelling" is nonsense when nothing was typed.
+    var emptyTitle: String {
+        switch self {
+        case .all: "No torrents"
+        case .downloading: "Nothing is downloading"
+        case .seeding: "Nothing is seeding"
+        case .paused: "Nothing is paused"
+        case .queued: "Nothing is queued"
+        }
+    }
+
     func matches(_ snapshot: TorrentSnapshot) -> Bool {
         switch self {
         case .all: true
@@ -55,6 +67,8 @@ struct TorrentListView: View {
     @State private var sortOrder: [KeyPathComparator<TorrentSnapshot>] =
         [KeyPathComparator(\.queuePosition)]
     @State private var searchText = ""
+    /// The row under the pointer, whose ring shows its pause/resume control.
+    @State private var hoveredRow: InfoHash?
     @State private var statusFilter: StatusFilter = .all
     /// Bumped once after launch to re-create toolbar buttons (see workaround).
     @State private var toolbarRefresh = 0
@@ -106,9 +120,13 @@ struct TorrentListView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // A shape style, not `.toolbarBackground`: the view that modifier
+        // inserts sits over the titlebar and swallows the mouse-down that drags
+        // the window, whereas a shape style hit-tests nothing. The titlebar
+        // itself is painted by the overlay further down.
         .background(Surface.panel)
+        .background(alignment: .topLeading) { WindowChrome().frame(width: 0, height: 0) }
         .toolbar { toolbarContent }
-        .toolbarBackground(Surface.chrome, for: .windowToolbar)
         .navigationTitle("SpeedyTorrent")
         // Workaround: toolbar buttons render with a stale dimmed appearance on
         // first launch until an event (e.g. mouse-over) refreshes them.
@@ -126,7 +144,7 @@ struct TorrentListView: View {
         .inspector(isPresented: $showInspector) {
             InspectorPane(selection: selection, tab: $inspectorTab)
                 .environment(store)
-                .inspectorColumnWidth(min: 260, ideal: 300, max: 460)
+                .inspectorColumnWidth(min: 360, ideal: 480, max: 800)
         }
         // Below the inspector split, not inside it, so the bar runs the full
         // width of the window the way the design draws it.
@@ -134,6 +152,24 @@ struct TorrentListView: View {
             if !store.snapshots.isEmpty {
                 statusBar
             }
+        }
+        // The titlebar, painted last so it covers the split: the inspector's
+        // divider runs the full height of the window, and the titlebar is
+        // transparent, so without this the divider carries on up through the
+        // toolbar. Hit-tests nothing, which is what leaves the titlebar
+        // draggable, and sits under the toolbar's own controls, which AppKit
+        // draws above the content.
+        .overlay {
+            GeometryReader { proxy in
+                VStack(spacing: 0) {
+                    Surface.chrome
+                        .frame(height: proxy.safeAreaInsets.top)
+                        .overlay(alignment: .bottom) { SurfaceSeparator() }
+                    Color.clear
+                }
+                .ignoresSafeArea()
+            }
+            .allowsHitTesting(false)
         }
         .fileImporter(
             isPresented: $showingFileImporter,
@@ -242,8 +278,20 @@ struct TorrentListView: View {
         store.snapshots.count { $0.state == .downloading || $0.state == .seeding }
     }
 
+    private var canPauseAll: Bool {
+        store.snapshots.contains { $0.state == .downloading || $0.state == .seeding || $0.state == .queued }
+    }
+
+    private var canResumeAll: Bool {
+        store.snapshots.contains { $0.state == .paused }
+    }
+
     private var heroTiles: some View {
         HStack(spacing: 10) {
+            AllDownloadsTile(
+                canPause: canPauseAll, canResume: canResumeAll,
+                pause: { store.pauseAll() }, resume: { store.resumeAll() }
+            )
             RateTile(
                 title: "Download", icon: "arrow.down", tint: .blue,
                 rate: store.totalDownloadRate,
@@ -256,15 +304,18 @@ struct TorrentListView: View {
                 samples: store.totalRateHistory, value: \.upload,
                 height: Surface.windowTileHeight
             )
+            // Capped: the two counters stop earning width long before the
+            // graphs do, so a wide window grows the sparklines instead.
             StatTile(
                 title: "Active", icon: "list.bullet",
                 value: "\(activeCount)", unit: "of \(store.snapshots.count)",
-                caption: activeCaption, height: Surface.windowTileHeight
+                caption: activeCaption, height: Surface.windowTileHeight,
+                maxWidth: Surface.statTileMaxWidth
             )
             StatTile(
                 title: "This session", icon: "clock",
                 value: session.value, unit: session.unit, caption: session.caption,
-                height: Surface.windowTileHeight
+                height: Surface.windowTileHeight, maxWidth: Surface.statTileMaxWidth
             )
         }
     }
@@ -306,6 +357,9 @@ struct TorrentListView: View {
 
         /// Row height, and the gap between a row's ring and its name.
         static let rowHeight: CGFloat = 40
+        /// Enough for a title, a line of explanation and a button, with the
+        /// breathing room an empty card wants.
+        static let emptyStateHeight: CGFloat = 168
         static let headerHeight: CGFloat = 25.5
         static let ring: CGFloat = 24
         static let ringGap: CGFloat = 10
@@ -315,19 +369,57 @@ struct TorrentListView: View {
         VStack(spacing: 0) {
             tableHeader
             SurfaceSeparator()
-            table
+            if displayedSnapshots.isEmpty {
+                // Inside the card, under the header — as an overlay it landed
+                // on top of the column titles and was squeezed into one row's
+                // worth of height.
+                emptyState
+            } else {
+                table
+            }
         }
         .background(Surface.fill)
         .clipShape(.rect(cornerRadius: Surface.corner))
-        .overlay {
-            if displayedSnapshots.isEmpty {
-                ContentUnavailableView.search
-            }
-        }
         // Hugs its rows rather than filling the window, as the design draws
         // it; a longer list is still capped by whatever height is available.
-        .frame(maxHeight: Col.headerHeight + 0.5
-            + CGFloat(max(displayedSnapshots.count, 1)) * Col.rowHeight)
+        .frame(maxHeight: Col.headerHeight + 0.5 + cardBodyHeight)
+    }
+
+    private var cardBodyHeight: CGFloat {
+        displayedSnapshots.isEmpty
+            ? Col.emptyStateHeight
+            : CGFloat(displayedSnapshots.count) * Col.rowHeight
+    }
+
+    /// Why the list is empty, in the terms the user just used: a filter, a
+    /// search, or both.
+    private var emptyState: some View {
+        VStack(spacing: 6) {
+            Text(searchText.isEmpty ? statusFilter.emptyTitle : "No matches")
+                .font(.system(size: 13, weight: .medium))
+            Text(emptyDetail)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            if !searchText.isEmpty || statusFilter != .all {
+                SurfaceButton(title: "Show All") {
+                    searchText = ""
+                    statusFilter = .all
+                }
+                .padding(.top, 2)
+            }
+        }
+        .padding(.horizontal, 20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var emptyDetail: String {
+        if !searchText.isEmpty {
+            return statusFilter == .all
+                ? "No torrent's name contains “\(searchText)”."
+                : "No \(statusFilter.rawValue.lowercased()) torrent's name contains “\(searchText)”."
+        }
+        return "Torrents appear here as soon as one is \(statusFilter.rawValue.lowercased())."
     }
 
     /// Our own header, because `TableColumn` takes a title string and offers no
@@ -420,6 +512,7 @@ struct TorrentListView: View {
 
     private func row(_ snapshot: TorrentSnapshot) -> some View {
         let isSelected = selection.contains(snapshot.infoHash)
+        let isHovered = hoveredRow == snapshot.infoHash
         return HStack(spacing: Col.spacing) {
             Text("\(snapshot.queuePosition)")
                 .foregroundStyle(.secondary)
@@ -428,7 +521,18 @@ struct TorrentListView: View {
             // The ring carries the state the Status column used to spell out:
             // tint for which state, glyph for which action, arc for progress.
             HStack(spacing: Col.ringGap) {
-                ProgressRing(snapshot: snapshot, diameter: Col.ring, compact: true)
+                // The ring is the row's pause/resume control, as it is in the
+                // popup: it swaps its readout for the action under the pointer.
+                ProgressRing(
+                    snapshot: snapshot, diameter: Col.ring, compact: true,
+                    showsControl: isHovered
+                ) {
+                    if snapshot.state == .paused {
+                        store.resume(snapshot.infoHash)
+                    } else {
+                        store.pause(snapshot.infoHash)
+                    }
+                }
                 Text(snapshot.name)
                     .lineLimit(1)
                     .foregroundStyle(
@@ -469,6 +573,13 @@ struct TorrentListView: View {
         // Opaque, and drawn by the row rather than behind it, so it covers the
         // system highlight instead of tinting it.
         .background(isSelected ? AnyShapeStyle(Surface.selection) : AnyShapeStyle(.clear))
+        .onHover { hovering in
+            if hovering {
+                hoveredRow = snapshot.infoHash
+            } else if hoveredRow == snapshot.infoHash {
+                hoveredRow = nil
+            }
+        }
     }
 
     // MARK: - Status bar
@@ -517,6 +628,8 @@ struct TorrentListView: View {
         }
         .padding(.horizontal, 12)
         .frame(height: Surface.statusBarHeight)
+        // Opaque, and its own colour: the bar has to hide the inspector's
+        // divider, which is drawn down the full height of the window behind it.
         .background(Surface.chrome)
         .overlay(alignment: .top) { SurfaceSeparator() }
     }
@@ -606,91 +719,101 @@ struct TorrentListView: View {
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
-        // After the window title, before the action icons: the name filter.
-        ToolbarItem(placement: .principal) {
-            ToolbarSearchField(text: $searchText, prompt: "Filter by name")
-                .frame(width: 200)
-        }
-
-        // One Add control with two destinations, matching the menu bar popup —
-        // two separate toolbar buttons made "open a file" and "paste a link"
-        // look like unrelated actions.
+        // One item, not seven: the design's toolbar is a row of flat fills, and
+        // macOS re-skins each item it owns (a menu's label loses its background,
+        // a button gains a bezel). Owning the whole row keeps it on-palette.
         ToolbarItem(placement: .primaryAction) {
-            Menu {
-                Button("Add .torrent…") { showingFileImporter = true }
-                Button("Add Magnet Link…") { showingMagnetSheet = true }
-            } label: {
-                Label("Add", systemImage: "plus")
+            HStack(spacing: 10) {
+                searchField
+
+                Menu {
+                    Button("Add .torrent…") { showingFileImporter = true }
+                    Button("Add Magnet Link…") { showingMagnetSheet = true }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus").font(.system(size: 12, weight: .medium))
+                        Text("Add").font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(.primary)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .padding(.horizontal, 8)
+                .frame(height: 24)
+                // The same fill the action buttons carry while they are
+                // clickable, so the whole row reads as one set of controls.
+                .background(Surface.fill, in: .rect(cornerRadius: Surface.corner - 2))
+                .help("Add a torrent file or magnet link")
+
+                toolbarButton("pause.fill", "Pause the selected torrents",
+                              enabled: selectedSnapshots.contains { $0.state == .downloading || $0.state == .seeding || $0.state == .queued }) {
+                    selectedSnapshots.forEach { store.pause($0.infoHash) }
+                }
+                toolbarButton("play.fill", "Resume the selected torrents",
+                              enabled: selectedSnapshots.contains { $0.state == .paused }) {
+                    selectedSnapshots.forEach { store.resume($0.infoHash) }
+                }
+                toolbarButton("folder", "Show the downloaded files in Finder",
+                              enabled: !selection.isEmpty) {
+                    selectedSnapshots.forEach { store.revealInFinder($0.infoHash) }
+                }
+                toolbarButton("trash", "Remove selected", enabled: !selection.isEmpty) {
+                    pendingRemoval = selectedSnapshots
+                }
+                toolbarButton("sidebar.trailing", "Show peers, trackers, and files for the selected torrent",
+                              enabled: true) {
+                    showInspector.toggle()
+                }
             }
-            // The design leads the toolbar with a filled, labelled Add: it is
-            // the one action a new window is for, and an unlabelled "+" beside
-            // five other glyphs did not read that way. macOS 26 draws its own
-            // bezel for a toolbar menu, so this gets the label and the tint but
-            // not the design's solid fill.
-            .menuStyle(.button)
-            .buttonStyle(.borderedProminent)
-            .labelStyle(.titleAndIcon)
-            .tint(Surface.prominent)
-            .help("Add a torrent file or magnet link")
             .id(toolbarRefresh)
         }
+    }
 
-        if #available(macOS 26.0, *) {
-            ToolbarSpacer(.fixed, placement: .primaryAction)
+    /// The design fills a toolbar button's background only while it can be
+    /// pressed, which is what makes a disabled control read as disabled here.
+    private func toolbarButton(
+        _ icon: String, _ help: String, enabled: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(enabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+                .frame(width: 26, height: 24)
+                .background {
+                    if enabled {
+                        RoundedRectangle(cornerRadius: Surface.corner - 2).fill(Surface.fill)
+                    }
+                }
+                .contentShape(.rect)
         }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .help(help)
+    }
 
-        ToolbarItemGroup(placement: .primaryAction) {
-            Button {
-                selectedSnapshots.forEach { store.pause($0.infoHash) }
-            } label: {
-                Label("Pause", systemImage: "pause.fill")
+    /// The name filter. `NSSearchField` brings the system's bright bezel with
+    /// it, so this is the app's own field: same shape and fill as everything
+    /// else on the panel.
+    private var searchField: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            TextField("Filter by name", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 12))
+            if !searchText.isEmpty {
+                Button { searchText = "" } label: {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.tertiary)
+                .help("Clear the filter")
             }
-            .help("Pause the selected torrents")
-            .id(toolbarRefresh)
-            .disabled(!selectedSnapshots.contains { $0.state == .downloading || $0.state == .seeding || $0.state == .queued })
-
-            Button {
-                selectedSnapshots.forEach { store.resume($0.infoHash) }
-            } label: {
-                Label("Resume", systemImage: "play.fill")
-            }
-            .help("Resume the selected torrents")
-            .id(toolbarRefresh)
-            .disabled(!selectedSnapshots.contains { $0.state == .paused })
-
-            Button {
-                store.snapshots.filter { selection.contains($0.infoHash) }
-                    .forEach { store.revealInFinder($0.infoHash) }
-            } label: {
-                Label("Show in Finder", systemImage: "folder")
-            }
-            .help("Show the downloaded files in Finder")
-            .id(toolbarRefresh)
-            .disabled(selection.isEmpty)
-
-            Button {
-                pendingRemoval = store.snapshots.filter { selection.contains($0.infoHash) }
-            } label: {
-                Label("Remove", systemImage: "trash")
-            }
-            .help("Remove selected")
-            .id(toolbarRefresh)
-            .disabled(selection.isEmpty)
         }
-
-        if #available(macOS 26.0, *) {
-            ToolbarSpacer(.fixed, placement: .primaryAction)
-        }
-
-        ToolbarItemGroup(placement: .primaryAction) {
-            Button {
-                showInspector.toggle()
-            } label: {
-                Label("Inspector", systemImage: "sidebar.trailing")
-            }
-            .help("Show peers, trackers, and files for the selected torrent")
-            .id(toolbarRefresh)
-        }
+        .padding(.horizontal, 8)
+        .frame(width: 178, height: 24)
+        .background(Surface.fill, in: .rect(cornerRadius: Surface.corner))
     }
 
     private var selectedSnapshots: [TorrentSnapshot] {
@@ -813,5 +936,83 @@ private struct ToolbarSearchField: NSViewRepresentable {
                 self.clickMonitor = nil
             }
         }
+    }
+}
+
+/// Clears the system's toolbar material so the window's own painting shows
+/// through the titlebar, and tints the window itself for the moments SwiftUI is
+/// not drawing it (live resize, before first layout).
+private struct WindowChrome: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = PassthroughView(frame: .zero)
+        DispatchQueue.main.async { configure(view.window) }
+        return view
+    }
+
+    /// Carries no pixels and must catch no clicks — it exists only to reach the
+    /// window it is installed in.
+    private final class PassthroughView: NSView {
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        configure(view.window)
+    }
+
+    private func configure(_ window: NSWindow?) {
+        guard let window else { return }
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = Surface.chromeColor
+    }
+}
+
+/// The hero row's one tile of controls: the same card, height and label as the
+/// readouts beside it, with buttons where they put a number.
+///
+/// It earns its place in this row rather than the toolbar because it is
+/// session-wide — the toolbar's pause and play act on the selection, and two
+/// pairs of identical glyphs meaning different things would not read.
+private struct AllDownloadsTile: View {
+    let canPause: Bool
+    let canResume: Bool
+    let pause: () -> Void
+    let resume: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            TileLabel(title: "All downloads", icon: "playpause", tint: .secondary)
+            HStack(spacing: 6) {
+                button("Pause", icon: "pause.fill", enabled: canPause, action: pause)
+                button("Resume", icon: "play.fill", enabled: canResume, action: resume)
+            }
+        }
+        .padding(.horizontal, 11)
+        .padding(.top, 9.5)
+        .frame(height: Surface.windowTileHeight, alignment: .topLeading)
+        // Fixed: buttons gain nothing from a wider window, so the rate tiles
+        // take that width instead.
+        .frame(width: 176, alignment: .leading)
+        .background(Surface.fill, in: .rect(cornerRadius: Surface.corner))
+    }
+
+    private func button(
+        _ title: String, icon: String, enabled: Bool, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: icon).font(.system(size: 9, weight: .semibold))
+                Text(title).font(.system(size: 11, weight: .medium))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Surface.hover))
+            .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(enabled ? AnyShapeStyle(.primary) : AnyShapeStyle(.tertiary))
+        .disabled(!enabled)
+        .help(enabled
+            ? "\(title) every torrent"
+            : "Nothing to \(title.lowercased())")
     }
 }

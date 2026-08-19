@@ -36,6 +36,11 @@ enum Surface {
     static let tileHeight: CGFloat = 58
     static let windowTileHeight: CGFloat = 71
 
+    /// A stat tile holds a count and a caption, and both stop needing room at
+    /// about this width. Capping them hands the slack in a wide window to the
+    /// rate tiles, whose sparklines actually read better for it.
+    static let statTileMaxWidth: CGFloat = 200
+
     /// The status bar runs the full width of the window, under the inspector
     /// as well as the list, so both sides have to keep clear of it.
     static let statusBarHeight: CGFloat = 33
@@ -51,18 +56,19 @@ enum Surface {
     /// The panel every surface sits on: opaque, and slightly lifted towards the
     /// top of the window. It replaces the system's vibrant material, which let
     /// the desktop tint each fill and made the whole app read warm.
+    static let panelTopColor = appearanceColor(dark: 0x1A242C, light: 0xF7F8FA)
+    static let panelBottomColor = appearanceColor(dark: 0x181D21, light: 0xEFF1F4)
+
     static let panel = LinearGradient(
-        colors: [
-            Color(nsColor: appearanceColor(dark: 0x1A242C, light: 0xF7F8FA)),
-            Color(nsColor: appearanceColor(dark: 0x181D21, light: 0xEFF1F4)),
-        ],
+        colors: [Color(nsColor: panelTopColor), Color(nsColor: panelBottomColor)],
         startPoint: .top,
         endPoint: .bottom
     )
 
     /// The toolbar and status bar: flatter and a touch more neutral than the
     /// panel, so the window's chrome reads as chrome.
-    static let chrome = Color(nsColor: appearanceColor(dark: 0x27272C, light: 0xE8E8EC))
+    static let chromeColor = appearanceColor(dark: 0x27272C, light: 0xE8E8EC)
+    static let chrome = Color(nsColor: chromeColor)
 
     static func appearanceColor(dark: UInt32, light: UInt32) -> NSColor {
         NSColor(name: nil) { appearance in
@@ -103,9 +109,9 @@ func splitRate(_ rate: Double) -> (value: String, unit: String) {
 
 // MARK: - Tiles
 
-/// The label line shared by both tile kinds, so a rate tile and a stat tile
-/// are indistinguishable above the fold.
-private struct TileLabel: View {
+/// The label line shared by every tile kind, so a rate tile, a stat tile and a
+/// tile of controls are indistinguishable above the fold.
+struct TileLabel: View {
     let title: String
     let icon: String
     let tint: Color
@@ -121,6 +127,9 @@ private struct TileLabel: View {
                 .font(.system(size: 10, weight: .medium))
                 .tracking(0.4)
                 .foregroundStyle(tint)
+                // Never two lines: a squeezed row should narrow the tile, not
+                // break "DOWNLOAD" across the label.
+                .lineLimit(1)
         }
     }
 }
@@ -135,9 +144,13 @@ private struct TileValue: View {
             Text(value)
                 .font(.system(size: 21, weight: .semibold))
                 .monospacedDigit()
+                // The readout is the point of the tile: the unit gives way
+                // first, and the number is never abbreviated.
+                .fixedSize()
             Text(unit)
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
     }
 }
@@ -228,6 +241,9 @@ struct StatTile: View {
     let caption: String
     var tint: Color = .secondary
     var height: CGFloat = Surface.tileHeight
+    /// Unbounded by default; a hero row caps it so the rate tiles take the
+    /// extra width instead.
+    var maxWidth: CGFloat = .infinity
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -242,7 +258,7 @@ struct StatTile: View {
         .padding(.horizontal, 11)
         .padding(.top, 9.5)
         .frame(height: height, alignment: .topLeading)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: maxWidth, alignment: .leading)
         .background(Surface.fill, in: .rect(cornerRadius: Surface.corner))
     }
 }
@@ -473,5 +489,132 @@ struct PillSegmentedControl<Value: Hashable>: View {
         }
         .padding(2)
         .background(Surface.fill, in: .rect(cornerRadius: Surface.corner - 1))
+    }
+}
+
+// MARK: - Sections
+
+/// A titled card. This is the app's answer to `Form`'s grouped sections, which
+/// draw the system's own material and read as a foreign object on these panels.
+/// Separate rows with `SurfaceSeparator()`.
+struct SurfaceSection<Content: View>: View {
+    var title: String?
+    var footer: String?
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let title {
+                Text(title.uppercased())
+                    .font(.system(size: 10, weight: .medium))
+                    .tracking(0.6)
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 2)
+            }
+            VStack(spacing: 0) { content }
+                .background(Surface.fill)
+                .clipShape(.rect(cornerRadius: Surface.corner))
+            if let footer {
+                Text(footer)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 2)
+            }
+        }
+    }
+}
+
+/// One row of a `SurfaceSection`: a label, an optional explanation under it,
+/// and whatever control or readout belongs on the trailing edge.
+struct SurfaceRow<Trailing: View>: View {
+    let label: String
+    var detail: String?
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(label)
+                    .font(.system(size: 12))
+                if let detail {
+                    Text(detail)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 12)
+            trailing
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+    }
+}
+
+extension SurfaceRow where Trailing == AnyView {
+    /// A read-only row: label on the left, value on the right. Long values wrap
+    /// rather than truncate — an info hash is only useful whole — and every
+    /// value is selectable so it can be copied out.
+    init(_ label: String, _ value: String, detail: String? = nil, monospaced: Bool = false) {
+        self.init(label: label, detail: detail) {
+            AnyView(
+                Text(value)
+                    .font(monospaced ? .system(size: 11).monospaced() : .system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .multilineTextAlignment(.trailing)
+                    .lineLimit(3)
+                    .textSelection(.enabled)
+            )
+        }
+    }
+}
+
+extension View {
+    /// Field chrome for text entry on a panel: the system bezel is a bright
+    /// rounded well that fights every other fill here.
+    func surfaceField(width: CGFloat) -> some View {
+        textFieldStyle(.plain)
+            .multilineTextAlignment(.trailing)
+            .font(.system(size: 12))
+            .monospacedDigit()
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .frame(width: width)
+            .background(Surface.hover, in: .rect(cornerRadius: 5))
+    }
+
+    /// The iOS-style switch, in the app's blue rather than the system accent.
+    func surfaceSwitch() -> some View {
+        toggleStyle(.switch)
+            .controlSize(.small)
+            .tint(Surface.prominent)
+            .labelsHidden()
+    }
+}
+
+/// A small capsule button for use inside a card.
+struct SurfaceButton: View {
+    let title: String
+    var role: ButtonRole?
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .padding(.horizontal, 9)
+                .padding(.vertical, 3)
+                .background {
+                    Capsule().fill(Surface.hover)
+                    if hovering { Capsule().fill(Surface.hover) }
+                }
+                .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(role == .destructive ? AnyShapeStyle(Color.red) : AnyShapeStyle(.primary))
+        .onHover { hovering = $0 }
     }
 }

@@ -154,6 +154,10 @@ struct TorrentFileTree: View {
     /// Rebuilt only when the file *shape* changes, not when progress ticks.
     @State private var nodes: [TorrentFileNode] = []
     @State private var builtShape: [Int] = []
+    /// Which folders are open. Owned here rather than by `OutlineGroup`, whose
+    /// disclosure chevron lives in a gutter outside the row — too close to the
+    /// card's edge to hit, and too faint to see against this fill.
+    @State private var expanded: Set<String> = []
 
     private var showsProgress: Bool {
         rows.contains { $0.completedLength != nil }
@@ -166,8 +170,9 @@ struct TorrentFileTree: View {
                 .padding(.top, 10)
                 .padding(.bottom, 4)
             List {
-                OutlineGroup(displayNodes, children: \.children) { node in
-                    row(node, aggregate: aggregates[node.id] ?? .empty)
+                ForEach(visibleRows, id: \.node.id) { entry in
+                    row(entry.node, depth: entry.depth, aggregate: aggregates[entry.node.id] ?? .empty)
+                        // Lines the chevron up with the summary line above it.
                         .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
                         .listRowSeparator(.hidden)
                 }
@@ -177,7 +182,6 @@ struct TorrentFileTree: View {
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
             .scrollIndicators(.never)
-            .padding(.leading, -Surface.listLeadingBleed)
             .padding(.trailing, -Surface.listTrailingBleed)
             .frame(maxHeight: .infinity)
         }
@@ -244,6 +248,22 @@ struct TorrentFileTree: View {
 
     private var displayNodes: [TorrentFileNode] {
         sortBySize ? Self.sortedBySize(nodes) : nodes
+    }
+
+    /// The tree flattened to the rows that are actually on screen, each with
+    /// the depth it should be indented to.
+    private var visibleRows: [(node: TorrentFileNode, depth: Int)] {
+        var result: [(node: TorrentFileNode, depth: Int)] = []
+        func walk(_ nodes: [TorrentFileNode], depth: Int) {
+            for node in nodes {
+                result.append((node, depth))
+                if let children = node.children, expanded.contains(node.id) {
+                    walk(children, depth: depth + 1)
+                }
+            }
+        }
+        walk(displayNodes, depth: 0)
+        return result
     }
 
     /// Largest first at every level (the build order is already by name).
@@ -326,13 +346,37 @@ struct TorrentFileTree: View {
 
     // MARK: - Rows
 
+    /// The disclosure control, drawn as part of the row so it sits where the
+    /// rest of the row's content does and takes the palette's colours.
     @ViewBuilder
-    private func row(_ node: TorrentFileNode, aggregate: Aggregate) -> some View {
+    private func disclosure(_ node: TorrentFileNode) -> some View {
+        if node.children == nil {
+            Color.clear.frame(width: 13, height: 13)
+        } else {
+            let isOpen = expanded.contains(node.id)
+            Button {
+                if isOpen { expanded.remove(node.id) } else { expanded.insert(node.id) }
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(isOpen ? 90 : 0))
+                    .frame(width: 13, height: 13)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .help(isOpen ? "Collapse" : "Expand")
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ node: TorrentFileNode, depth: Int, aggregate: Aggregate) -> some View {
         let checkState: TriStateCheckbox.CheckState = aggregate.selectedCount == aggregate.fileCount
             ? .on
             : (aggregate.selectedCount == 0 ? .off : .mixed)
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 8) {
+                disclosure(node)
                 if let selection {
                     TriStateCheckbox(
                         state: checkState,
@@ -376,6 +420,7 @@ struct TorrentFileTree: View {
             }
         }
         .padding(.vertical, 5)
+        .padding(.leading, CGFloat(depth) * 15)
         .help(aggregate.skipped ? "Not being downloaded"
             : aggregate.progress.formatted(.percent.precision(.fractionLength(0))))
     }
