@@ -72,14 +72,13 @@ struct TorrentDetailView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            Picker("View", selection: $tab) {
-                ForEach(TorrentDetailTab.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .padding(.horizontal, 10)
+            PillSegmentedControl(
+                options: TorrentDetailTab.allCases,
+                title: \.rawValue,
+                selection: $tab
+            )
+            .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            Divider()
             switch tab {
             case .files: filesTab
             case .info: infoTab
@@ -105,27 +104,45 @@ struct TorrentDetailView: View {
     // MARK: - Header
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(name)
-                .font(.headline)
-                .lineLimit(2)
+        HStack(spacing: 11) {
             if let snapshot {
-                HStack(spacing: 12) {
-                    Label("\(snapshot.peerCount)", systemImage: "person.2")
-                    Label(formatRate(snapshot.downloadRate), systemImage: "arrow.down")
-                    Label(formatRate(snapshot.uploadRate), systemImage: "arrow.up")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            } else if let pending {
-                Text(pendingDetail(pending))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                ProgressRing(snapshot: snapshot, diameter: 40)
             }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(.system(size: 14, weight: .semibold))
+                    .lineLimit(2)
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 12)
         .padding(.top, 12)
+    }
+
+    /// Size, peers and what the torrent is doing, on one line. The rates that
+    /// used to sit here are on the torrent's own row in the list, which stays
+    /// selected while this pane is open.
+    private var subtitle: String {
+        if let snapshot {
+            var parts = [formatBytes(snapshot.totalLength)]
+            parts.append("\(snapshot.peerCount) peer" + (snapshot.peerCount == 1 ? "" : "s"))
+            switch snapshot.state {
+            case .downloading:
+                if snapshot.eta != nil { parts.append(formatETA(snapshot.eta) + " left") }
+            case .seeding:
+                parts.append("ratio " + String(format: "%.2f", snapshot.ratio))
+            default:
+                parts.append(snapshot.state.displayName)
+            }
+            return parts.joined(separator: " · ")
+        }
+        if let pending { return pendingDetail(pending) }
+        return "—"
     }
 
     private func pendingDetail(_ pending: PendingTorrentAdd) -> String {
@@ -141,13 +158,24 @@ struct TorrentDetailView: View {
 
     private var filesTab: some View {
         VStack(alignment: .leading, spacing: 10) {
-            locationRow
-            sequentialToggle
-            Divider()
             fileTree
+                .frame(maxHeight: .infinity)
+                .background(Surface.fill)
+                .clipShape(.rect(cornerRadius: Surface.corner))
+
+            // Where and how this torrent downloads — one card, pinned below the
+            // list so the files get every spare point of height.
+            VStack(alignment: .leading, spacing: 8) {
+                locationRow
+                SurfaceSeparator()
+                sequentialToggle
+            }
+            .padding(10)
+            .background(Surface.fill)
+            .clipShape(.rect(cornerRadius: Surface.corner))
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.bottom, 12)
         .fileImporter(isPresented: $showingFolderPicker, allowedContentTypes: [.folder]) { result in
             guard let url = try? result.get() else { return }
             chooseDirectory(url)

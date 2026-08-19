@@ -3,20 +3,13 @@ import SwiftUI
 import UniformTypeIdentifiers
 import TorrentEngine
 
-/// The popup's palette and metrics.
+/// The popup's own background.
 ///
 /// The panel paints itself opaquely rather than sitting on the menu's vibrant
 /// material: vibrancy let the desktop tint every fill, which is what made the
-/// shipped popup read warm and washed-out next to the design. Every surface
-/// above the panel — tiles, the torrent card, pills, round buttons — is the
-/// same single step of `primary`, and hover adds that step again.
+/// shipped popup read warm and washed-out next to the design. A normal window
+/// needs none of this; everything drawn *above* a panel lives in `Surface`.
 private enum Popup {
-    static let corner: CGFloat = 8
-    static let fill = Color.primary.opacity(0.10)
-    static let hover = Color.primary.opacity(0.11)
-    static let separator = Color.primary.opacity(0.15)
-    static let ringTrack = Color.primary.opacity(0.21)
-
     /// The panel's slight lift towards the top of the window.
     static let background = LinearGradient(
         colors: [
@@ -123,31 +116,23 @@ struct MenuBarView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 22)
-            .background(Popup.fill, in: .rect(cornerRadius: Popup.corner))
+            .background(Surface.fill, in: .rect(cornerRadius: Surface.corner))
         } else {
             VStack(spacing: 0) {
                 ForEach(Array(visible.enumerated()), id: \.element.id) { index, snapshot in
-                    if index > 0 { separator }
+                    if index > 0 { SurfaceSeparator() }
                     row(snapshot)
                 }
                 if overflow > 0 {
-                    separator
+                    SurfaceSeparator()
                     moreRow
                 }
             }
-            .background(Popup.fill)
+            .background(Surface.fill)
             // Clipped rather than filled through a shape so a hovered first or
             // last row follows the card's corners instead of squaring them off.
-            .clipShape(.rect(cornerRadius: Popup.corner))
+            .clipShape(.rect(cornerRadius: Surface.corner))
         }
-    }
-
-    /// A hairline between rows. `Divider()` is tuned for the vibrant menu
-    /// material and all but vanishes against the opaque panel.
-    private var separator: some View {
-        Rectangle()
-            .fill(Popup.separator)
-            .frame(height: 0.5)
     }
 
     private func row(_ snapshot: TorrentSnapshot) -> some View {
@@ -189,7 +174,7 @@ struct MenuBarView: View {
         .padding(.leading, 12)
         .padding(.trailing, 10)
         .padding(.vertical, 7.5)
-        .background(isHovered ? Popup.hover : .clear)
+        .background(isHovered ? Surface.hover : .clear)
         .contentShape(.rect)
         .onTapGesture { showSettings(snapshot.infoHash) }
         .onHover { hovering in
@@ -344,290 +329,6 @@ private func progressText(done: Int64, of total: Int64) -> String {
         return "\(doneText.dropLast(unit.count + 1)) of \(totalText)"
     }
     return "\(doneText) of \(totalText)"
-}
-
-private func percent(_ snapshot: TorrentSnapshot) -> String {
-    snapshot.progress.formatted(.percent.precision(.fractionLength(0)))
-}
-
-/// Splits a byte rate into a short value and its unit — "5.3" and "MB/s" — so
-/// the tiles can set them at different sizes.
-private func splitRate(_ rate: Double) -> (value: String, unit: String) {
-    if rate >= 1024 * 1024 {
-        let mib = rate / (1024 * 1024)
-        return (String(format: mib < 10 ? "%.1f" : "%.0f", mib), "MB/s")
-    }
-    return (String(format: "%.0f", max(0, rate) / 1024), "KB/s")
-}
-
-// MARK: - Components
-
-/// One aggregate rate tile: a large current-rate readout over a sparkline of
-/// the last minute of samples.
-private struct RateTile: View {
-    let title: String
-    let icon: String
-    let tint: Color
-    let rate: Double
-    let samples: [RateSample]
-    let value: KeyPath<RateSample, Double>
-
-    /// The last minute of 1 Hz samples. The full three-minute history is too
-    /// much detail for a tile this small.
-    private var window: [RateSample] { Array(samples.suffix(60)) }
-
-    private var ceiling: Double {
-        max(20 * 1024, window.reduce(0) { max($0, $1[keyPath: value]) } * 1.2)
-    }
-
-    /// Nothing has moved in the last minute. Drawn anyway, a flat line pinned
-    /// to the bottom of the tile reads as a stray rule rather than a graph, so
-    /// an idle tile shows only its readout.
-    private var isIdle: Bool {
-        !window.contains { $0[keyPath: value] >= 1024 }
-    }
-
-    var body: some View {
-        let parts = splitRate(rate)
-        return ZStack(alignment: .topLeading) {
-            if !isIdle { sparkline }
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 4.5) {
-                    // Only the word carries the tint — the arrow stays at full
-                    // strength, which is what keeps the two tiles legible when
-                    // a sparkline runs underneath them.
-                    Image(systemName: icon)
-                        .font(.system(size: 8, weight: .bold))
-                    Text(title.uppercased())
-                        .font(.system(size: 10, weight: .medium))
-                        .tracking(0.4)
-                        .foregroundStyle(tint)
-                }
-
-                HStack(alignment: .firstTextBaseline, spacing: 2) {
-                    Text(parts.value)
-                        .font(.system(size: 21, weight: .semibold))
-                        .monospacedDigit()
-                    Text(parts.unit)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 11)
-            .padding(.top, 9.5)
-        }
-        .frame(height: 58)
-        // Leading, not centred: an idle tile has no sparkline to stretch the
-        // stack, and the readout has to stay flush with the tile's edge either
-        // way.
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Popup.fill, in: .rect(cornerRadius: Popup.corner))
-    }
-
-    private var sparkline: some View {
-        Chart(window) { sample in
-            AreaMark(
-                x: .value("Time", sample.time),
-                y: .value("Rate", sample[keyPath: value])
-            )
-            .foregroundStyle(tint.opacity(0.16))
-            .interpolationMethod(.linear)
-            LineMark(
-                x: .value("Time", sample.time),
-                y: .value("Rate", sample[keyPath: value])
-            )
-            .foregroundStyle(tint)
-            .lineStyle(StrokeStyle(lineWidth: 1.5, lineJoin: .round))
-            .interpolationMethod(.linear)
-        }
-        .chartXAxis(.hidden)
-        .chartYAxis(.hidden)
-        .chartYScale(domain: 0...ceiling)
-        .chartLegend(.hidden)
-        .chartPlotStyle { $0.padding(0) }
-        .frame(height: 24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-        .allowsHitTesting(false)
-    }
-}
-
-/// A row's leading progress ring. While the pointer is over the row it swaps
-/// its readout for the pause/resume control, giving the action a 30pt target
-/// where the old layout had a caption-sized gear.
-private struct ProgressRing: View {
-    let snapshot: TorrentSnapshot
-    let showsControl: Bool
-    let toggle: () -> Void
-
-    /// Matches the list's context menu: only these states have a meaningful
-    /// pause/resume toggle.
-    private var isActionable: Bool {
-        switch snapshot.state {
-        case .downloading, .seeding, .queued, .paused: true
-        default: false
-        }
-    }
-
-    var body: some View {
-        if isActionable {
-            Button(action: toggle) { ring }
-                .buttonStyle(.plain)
-                .help(snapshot.state == .paused ? "Resume" : "Pause")
-        } else {
-            ring
-        }
-    }
-
-    /// Inset by half the stroke so the ring's ink sits inside its frame, which
-    /// is what lets the row's padding read as the design's 12pt.
-    private static let stroke: CGFloat = 2.5
-
-    private var ring: some View {
-        ZStack {
-            Circle()
-                .inset(by: Self.stroke / 2)
-                .stroke(Popup.ringTrack, lineWidth: Self.stroke)
-            Circle()
-                .inset(by: Self.stroke / 2)
-                .trim(from: 0, to: min(1, max(0, snapshot.progress)))
-                .stroke(
-                    snapshot.state.tint,
-                    style: StrokeStyle(lineWidth: Self.stroke, lineCap: .round)
-                )
-                .rotationEffect(.degrees(-90))
-            glyph
-        }
-        .frame(width: 27, height: 27)
-        .contentShape(.circle)
-    }
-
-    @ViewBuilder
-    private var glyph: some View {
-        if showsControl, isActionable {
-            Image(systemName: snapshot.state == .paused ? "play.fill" : "pause.fill")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(snapshot.state.tint)
-        } else if snapshot.state == .downloading {
-            Text(percent(snapshot))
-                .font(.system(size: 9, weight: .semibold))
-                .monospacedDigit()
-        } else {
-            Image(systemName: glyphName)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(snapshot.state.tint)
-        }
-    }
-
-    /// A glyph light enough to sit inside the ring. `TorrentState.iconName` is
-    /// tuned for the table's filled-circle badges, which read as a second ring
-    /// here.
-    private var glyphName: String {
-        switch snapshot.state {
-        case .downloading: "arrow.down"
-        case .seeding: "arrow.up"
-        case .paused: "play.fill"
-        case .queued: "clock"
-        case .checking: "magnifyingglass"
-        case .moving: "shippingbox"
-        case .fetchingMetadata: "antenna.radiowaves.left.and.right"
-        case .failed: "exclamationmark"
-        }
-    }
-}
-
-/// The capsule look shared by the footer's labelled controls, so the plain
-/// button and the menu are indistinguishable until one is opened.
-private struct PillLabel: View {
-    let title: String
-    let icon: String
-    let hovering: Bool
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: icon)
-                .font(.system(size: 10, weight: .semibold))
-            Text(title)
-                .font(.system(size: 12, weight: .medium))
-        }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 6)
-        .background {
-            Capsule().fill(Popup.fill)
-            if hovering { Capsule().fill(Popup.hover) }
-        }
-        .contentShape(.capsule)
-    }
-}
-
-/// A labelled capsule control for the footer's primary actions.
-private struct PillButton: View {
-    let title: String
-    let icon: String
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            PillLabel(title: title, icon: icon, hovering: hovering)
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-    }
-}
-
-/// The footer's Add control. Its two destinations don't fit as separate pills
-/// beside "Pause All" in a 320pt popup, so they hang off one menu.
-private struct PillMenu: View {
-    let title: String
-    let icon: String
-    let addFile: () -> Void
-    let addMagnet: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Menu {
-            Button("Add .torrent…", action: addFile)
-            Button("Add Magnet Link…", action: addMagnet)
-        } label: {
-            PillLabel(title: title, icon: icon, hovering: hovering)
-        }
-        .menuStyle(.button)
-        .buttonStyle(.plain)
-        .menuIndicator(.hidden)
-        .fixedSize()
-        .onHover { hovering = $0 }
-    }
-}
-
-/// An icon-only round control for the footer's window actions.
-private struct CircleButton: View {
-    let icon: String
-    var prominent = false
-    let action: () -> Void
-    @State private var hovering = false
-
-    var body: some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(prominent ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-                .frame(width: 28, height: 28)
-                .background {
-                    // The design's blue, not the system accent: the popup's
-                    // other blue (download rate, progress) is `.blue`, and a
-                    // non-blue accent left this button as the odd one out.
-                    if prominent {
-                        Circle().fill(Color.blue)
-                    } else {
-                        Circle().fill(Popup.fill)
-                    }
-                    if hovering { Circle().fill(Popup.hover) }
-                }
-                .contentShape(.circle)
-        }
-        .buttonStyle(.plain)
-        .onHover { hovering = $0 }
-    }
 }
 
 /// The menu bar label showing aggregate transfer rates. Because this view

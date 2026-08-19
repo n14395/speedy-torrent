@@ -163,13 +163,18 @@ struct TorrentFileTree: View {
         VStack(alignment: .leading, spacing: 6) {
             if selection != nil {
                 header
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
             }
             List {
                 OutlineGroup(displayNodes, children: \.children) { node in
                     row(node, aggregate: aggregates[node.id] ?? .empty)
                 }
             }
-            .listStyle(.bordered)
+            // Plain, not `.bordered`: the caller wraps this in a card, and the
+            // bordered style drew a second box inside it.
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
             .frame(maxHeight: .infinity)
         }
         .onAppear { rebuildIfNeeded() }
