@@ -980,7 +980,7 @@ private struct AllDownloadsTile: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            TileLabel(title: "All downloads", icon: "playpause", tint: .secondary)
+            TileLabel(title: "All downloads")
             HStack(spacing: 6) {
                 button("Pause", icon: "pause.fill", enabled: canPause, action: pause)
                 button("Resume", icon: "play.fill", enabled: canResume, action: resume)

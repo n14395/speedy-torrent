@@ -26,24 +26,45 @@ struct AddTorrentSheet: View {
         VStack(spacing: 0) {
             TorrentDetailView(subject: .pending(pendingID), tab: $tab)
                 .environment(store)
-            Divider()
-            HStack {
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            SurfaceSeparator()
+            HStack(spacing: 8) {
                 Spacer()
-                Button("Cancel") {
-                    store.dismissPendingAdd(id: pendingID)
-                }
-                .keyboardShortcut(.cancelAction)
-                Button("Add Torrent") {
+                footerButton("Cancel") { store.dismissPendingAdd(id: pendingID) }
+                    .keyboardShortcut(.cancelAction)
+                footerButton("Add Torrent", prominent: true, enabled: !addDisabled) {
                     store.confirmPendingAdd(id: pendingID)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(addDisabled)
             }
             .padding(12)
         }
+        // The same panel the inspector paints, because this is the same view:
+        // on the sheet's own background it read as a different app.
+        .background(Surface.panel)
         // Fixed size: switching between a tall tab (Files) and a short one
         // (Info) must not animate the sheet resizing.
         .frame(width: 620, height: 560)
+    }
+
+    private func footerButton(
+        _ title: String, prominent: Bool = false, enabled: Bool = true,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(prominent ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background {
+                    Capsule().fill(prominent ? AnyShapeStyle(Surface.prominent) : AnyShapeStyle(Surface.fill))
+                }
+                .opacity(enabled ? 1 : 0.4)
+                .contentShape(.capsule)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
     }
 
     /// Nothing selected means nothing to download; an unresolved magnet is

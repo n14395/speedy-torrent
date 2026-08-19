@@ -113,16 +113,20 @@ func splitRate(_ rate: Double) -> (value: String, unit: String) {
 /// tile of controls are indistinguishable above the fold.
 struct TileLabel: View {
     let title: String
-    let icon: String
-    let tint: Color
+    /// Optional: a tile of controls says what it is with its buttons, and a
+    /// glyph there only competes with them.
+    var icon: String?
+    var tint: Color = .secondary
 
     var body: some View {
         HStack(spacing: 4.5) {
             // Only the word carries the tint — the glyph stays at full
             // strength, which is what keeps a tile legible when a sparkline
             // runs underneath it.
-            Image(systemName: icon)
-                .font(.system(size: 8, weight: .bold))
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 8, weight: .bold))
+            }
             Text(title.uppercased())
                 .font(.system(size: 10, weight: .medium))
                 .tracking(0.4)
