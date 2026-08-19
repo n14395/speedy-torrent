@@ -145,17 +145,33 @@ public actor TorrentSession {
     /// Re-adds every persisted torrent (call once at startup).
     public func restore() async {
         guard let persistence else { return }
-        for entry in persistence.loadAll() {
-            guard let meta = try? TorrentMetaInfo(torrentFileData: entry.torrentData) else { continue }
-            let directory = entry.resume.map { URL(fileURLWithPath: $0.downloadDirectory) }
-            _ = try? await addTorrent(
-                info: meta.info,
-                announceTiers: meta.announceTiers,
-                downloadDirectory: directory,
-                resume: entry.resume,
-                persistTorrentData: nil,
-                webSeeds: meta.webSeeds
-            )
+        for entry in persistence.loadEntries() {
+            switch entry {
+            case .torrent(let torrentData, let resume):
+                guard let meta = try? TorrentMetaInfo(torrentFileData: torrentData) else { continue }
+                let directory = resume.map { URL(fileURLWithPath: $0.downloadDirectory) }
+                _ = try? await addTorrent(
+                    info: meta.info,
+                    announceTiers: meta.announceTiers,
+                    downloadDirectory: directory,
+                    resume: resume,
+                    persistTorrentData: nil,
+                    webSeeds: meta.webSeeds
+                )
+            case .magnet(let record):
+                guard let hash = InfoHash(hex: record.infoHashHex) else { continue }
+                let magnet = MagnetLink(
+                    infoHash: hash,
+                    displayName: record.displayName,
+                    trackers: record.trackers
+                )
+                _ = try? await addMagnet(
+                    magnet,
+                    downloadDirectory: URL(fileURLWithPath: record.downloadDirectory),
+                    sequential: record.sequential,
+                    addedAt: record.addedAt
+                )
+            }
         }
     }
 
@@ -305,6 +321,21 @@ public actor TorrentSession {
         guard let magnet = MagnetLink(string: magnetString) else {
             throw SessionError.invalidMagnet
         }
+        return try await addMagnet(
+            magnet,
+            downloadDirectory: downloadDirectory,
+            sequential: sequential,
+            addedAt: Date().timeIntervalSince1970
+        )
+    }
+
+    @discardableResult
+    private func addMagnet(
+        _ magnet: MagnetLink,
+        downloadDirectory: URL?,
+        sequential: Bool?,
+        addedAt: Double
+    ) async throws -> InfoHash {
         guard controllers[magnet.infoHash] == nil, magnets[magnet.infoHash] == nil else {
             throw SessionError.duplicateTorrent
         }
@@ -316,14 +347,35 @@ public actor TorrentSession {
             downloadDirectory: downloadDirectory ?? configuration.downloadDirectory,
             sequential: sequential ?? configuration.sequentialDownload,
             encryptionPolicy: configuration.encryptionPolicy,
+            addedAt: addedAt,
             discoverPeers: discover
         ) { [weak self] infoData in
             await self?.metadataResolved(magnet: magnet, infoData: infoData)
         }
         magnets[magnet.infoHash] = controller
         order.append(magnet.infoHash)
+        await persistMagnet(controller)
+        persistOrder()
         await controller.start()
         return magnet.infoHash
+    }
+
+    /// Records an unresolved magnet so it comes back after a relaunch,
+    /// carrying whatever settings it has been given so far.
+    private func persistMagnet(_ controller: MagnetController) async {
+        guard let persistence else { return }
+        let magnet = controller.magnet
+        persistence.saveMagnet(
+            MagnetRecord(
+                infoHashHex: magnet.infoHash.hexString,
+                displayName: magnet.displayName,
+                trackers: magnet.trackers,
+                downloadDirectory: await controller.downloadDirectory.path,
+                sequential: await controller.sequential,
+                addedAt: controller.addedAt
+            ),
+            for: magnet.infoHash
+        )
     }
 
     private func metadataResolved(magnet: MagnetLink, infoData: Data) async {
@@ -336,6 +388,8 @@ public actor TorrentSession {
         let sequential = await magnetController.sequential
         await magnetController.stop()
         order.removeAll { $0 == magnet.infoHash }
+        // The pending-magnet marker is superseded by real torrent state.
+        persistence?.removeMagnet(for: magnet.infoHash)
 
         let tiers = magnet.trackers.map { [$0] }
         let assembled = TorrentMetaInfo.assembleTorrentData(
@@ -474,6 +528,8 @@ public actor TorrentSession {
             // committed magnet so no peers/progress are lost.
             magnets[infoHash] = controller
             order.append(infoHash)
+            await persistMagnet(controller)
+            persistOrder()
             return infoHash
         }
     }
@@ -486,6 +542,7 @@ public actor TorrentSession {
             await controller.setSequential(sequential)
         } else if let magnet = magnets[infoHash] {
             await magnet.setSequential(sequential)
+            await persistMagnet(magnet)
         } else {
             throw SessionError.unknownTorrent
         }
@@ -498,6 +555,7 @@ public actor TorrentSession {
             try await controller.setDownloadDirectory(directory)
         } else if let magnet = magnets[infoHash] {
             await magnet.setDownloadDirectory(directory)
+            await persistMagnet(magnet)
         } else {
             throw SessionError.unknownTorrent
         }
@@ -541,6 +599,7 @@ public actor TorrentSession {
             statsBaselines[infoHash] = nil
             await magnet.stop()
             persistence?.remove(for: infoHash)
+            persistOrder()
             return
         }
         guard let controller = controllers.removeValue(forKey: infoHash) else {
@@ -696,7 +755,8 @@ public actor TorrentSession {
     public func shutdown() async {
         listener?.cancel()
         listener = nil
-        await portMapper.stop()
+        let portMapper = portMapper
+        await withDeadline(seconds: 2) { await portMapper.stop() }
         lsdTask?.cancel()
         await lsd.stop()
         dhtTask?.cancel()
@@ -711,7 +771,14 @@ public actor TorrentSession {
         prefetches.removeAll()
         for controller in controllers.values {
             accumulateStats([await controller.snapshot()])
-            await controller.stop()
+        }
+        // Stop torrents concurrently: one unreachable tracker must not delay
+        // every other torrent's resume save.
+        let stopping = Array(controllers.values)
+        await withTaskGroup(of: Void.self) { group in
+            for controller in stopping {
+                group.addTask { await controller.stop() }
+            }
         }
         persistStats()
         controllers.removeAll()

@@ -1,6 +1,31 @@
 import SwiftUI
 import TorrentEngine
 
+/// One file of a torrent, from either an added torrent (`TorrentFileStatus`)
+/// or one the user has opened but not confirmed yet (`FileEntry` offsets).
+struct FileRow: Identifiable, Equatable {
+    var id: Int { index }
+    let index: Int
+    let path: [String]
+    let length: Int64
+    /// Verified bytes on disk, or nil when the torrent isn't added yet.
+    let completedLength: Int64?
+    /// The engine's current selection, used when the tree is read-only.
+    var wanted = true
+}
+
+extension Array where Element == TorrentFileStatus {
+    /// Engine-authoritative rows, carrying download progress.
+    var fileRows: [FileRow] {
+        map {
+            FileRow(
+                index: $0.index, path: $0.path, length: $0.length,
+                completedLength: $0.completedLength, wanted: $0.wanted
+            )
+        }
+    }
+}
+
 /// The torrent's file hierarchy rebuilt from its flat path list.
 struct TorrentFileNode: Identifiable {
     let id: String
@@ -8,18 +33,17 @@ struct TorrentFileNode: Identifiable {
     /// Set for leaves; directories have children instead.
     let fileIndex: Int?
     let length: Int64
+    /// All file indices under this node (itself for a leaf). Precomputed
+    /// during `build` — it is read per row, per render, at 1 Hz.
+    let descendantIndices: Set<Int>
     var children: [TorrentFileNode]?
-
-    /// All file indices under this node (itself for a leaf).
-    var descendantIndices: Set<Int> {
-        if let fileIndex {
-            return [fileIndex]
-        }
-        return (children ?? []).reduce(into: []) { $0.formUnion($1.descendantIndices) }
-    }
 
     static func build(from files: [(index: Int, path: [String], length: Int64)]) -> [TorrentFileNode] {
         buildLevel(files.map { ($0.index, $0.path, $0.length) }, prefix: "")
+    }
+
+    static func build(from rows: [FileRow]) -> [TorrentFileNode] {
+        buildLevel(rows.map { ($0.index, $0.path, $0.length) }, prefix: "")
     }
 
     private static func buildLevel(
@@ -36,6 +60,7 @@ struct TorrentFileNode: Identifiable {
                     name: entry.path[0],
                     fileIndex: entry.index,
                     length: entry.length,
+                    descendantIndices: [entry.index],
                     children: nil
                 ))
             } else {
@@ -52,6 +77,7 @@ struct TorrentFileNode: Identifiable {
                 name: name,
                 fileIndex: nil,
                 length: children.reduce(0) { $0 + $1.length },
+                descendantIndices: children.reduce(into: []) { $0.formUnion($1.descendantIndices) },
                 children: children
             )
         }
@@ -63,7 +89,7 @@ struct TorrentFileNode: Identifiable {
 
 /// A native checkbox that can show the indeterminate (dash) state for
 /// partially selected folders — SwiftUI's Toggle cannot.
-private struct TriStateCheckbox: NSViewRepresentable {
+struct TriStateCheckbox: NSViewRepresentable {
     enum CheckState {
         case off, mixed, on
     }
@@ -113,52 +139,81 @@ private struct TriStateCheckbox: NSViewRepresentable {
     }
 }
 
-/// Checkbox tree for choosing which files to download. Directories toggle all
-/// of their descendants (showing a dash when partially selected); the last
-/// selected file cannot be deselected. Sortable by name or size.
-struct FileSelectionList: View {
-    let nodes: [TorrentFileNode]
-    @Binding var wanted: Set<Int>
-    let fileCount: Int
+/// The torrent's files as a tree: per-file download progress, and — when a
+/// selection binding is supplied — checkboxes choosing what to download.
+/// Directories toggle all of their descendants (showing a dash when partially
+/// selected); the last selected file cannot be deselected. Sortable by name or
+/// size.
+struct TorrentFileTree: View {
+    let rows: [FileRow]
+    /// nil renders a read-only tree.
+    var selection: Binding<Set<Int>>?
 
     /// Remembered across sheets and launches.
     @AppStorage("fileTreeSortBySize") private var sortBySize = false
+    /// Rebuilt only when the file *shape* changes, not when progress ticks.
+    @State private var nodes: [TorrentFileNode] = []
+    @State private var builtShape: [Int] = []
+
+    private var showsProgress: Bool {
+        rows.contains { $0.completedLength != nil }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Files")
-                    .font(.subheadline.weight(.medium))
-                Picker("Sort", selection: $sortBySize) {
-                    Text("Name").tag(false)
-                    Text("Size").tag(true)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(width: 110)
-                .help("Order the file tree by name or by size")
-                Spacer()
-                Text("\(wanted.count) of \(fileCount) selected")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("All") { wanted = allIndices }
-                    .controlSize(.small)
-                    .disabled(wanted == allIndices)
+            if selection != nil {
+                header
             }
             List {
                 OutlineGroup(displayNodes, children: \.children) { node in
-                    row(node)
+                    row(node, aggregate: aggregates[node.id] ?? .empty)
                 }
             }
             .listStyle(.bordered)
-            // Tall enough to show ~12 rows before scrolling.
-            .frame(minHeight: 300, maxHeight: 340)
+            .frame(maxHeight: .infinity)
+        }
+        .onAppear { rebuildIfNeeded() }
+        .onChange(of: rows.map(\.index)) { rebuildIfNeeded() }
+    }
+
+    private var header: some View {
+        HStack {
+            Picker("Sort", selection: $sortBySize) {
+                Text("Name").tag(false)
+                Text("Size").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .controlSize(.small)
+            .frame(width: 110)
+            .help("Order the file tree by name or by size")
+            Spacer()
+            Text("\(wanted.count) of \(rows.count) selected")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("All") { selection?.wrappedValue = allIndices }
+                .controlSize(.small)
+                .disabled(wanted == allIndices)
         }
     }
 
+    // MARK: - Data
+
+    /// The editable selection when there is one, otherwise whatever the engine
+    /// currently wants.
+    private var wanted: Set<Int> {
+        selection?.wrappedValue ?? Set(rows.filter(\.wanted).map(\.index))
+    }
+
     private var allIndices: Set<Int> {
-        nodes.reduce(into: []) { $0.formUnion($1.descendantIndices) }
+        Set(rows.map(\.index))
+    }
+
+    private func rebuildIfNeeded() {
+        let shape = rows.map(\.index)
+        guard shape != builtShape || nodes.isEmpty else { return }
+        nodes = TorrentFileNode.build(from: rows)
+        builtShape = shape
     }
 
     private var displayNodes: [TorrentFileNode] {
@@ -182,30 +237,87 @@ struct FileSelectionList: View {
             }
     }
 
-    @ViewBuilder
-    private func row(_ node: TorrentFileNode) -> some View {
-        let descendants = node.descendantIndices
-        let selectedCount = descendants.intersection(wanted).count
-        let checkState: TriStateCheckbox.CheckState = selectedCount == descendants.count
-            ? .on
-            : (selectedCount == 0 ? .off : .mixed)
-        HStack(spacing: 6) {
-            TriStateCheckbox(
-                state: checkState,
-                // Fully deselecting this node would leave nothing selected.
-                enabled: !(checkState == .on && wanted.subtracting(descendants).isEmpty),
-                onToggle: { selectAll in
-                    if selectAll {
-                        wanted.formUnion(descendants)
-                    } else {
-                        let remaining = wanted.subtracting(descendants)
-                        if !remaining.isEmpty {
-                            wanted = remaining
-                        }
-                    }
+    /// Per-node rollups, computed in one pass instead of rescanning every file
+    /// for every row.
+    struct Aggregate {
+        var selectedCount = 0
+        var fileCount = 0
+        var wantedLength: Int64 = 0
+        var wantedDone: Int64 = 0
+        var totalLength: Int64 = 0
+        var totalDone: Int64 = 0
+
+        static let empty = Aggregate()
+
+        /// Progress over wanted bytes when anything is wanted; otherwise raw
+        /// completion, so a partly downloaded skipped file still shows a bar.
+        var progress: Double {
+            if wantedLength > 0 { return Double(wantedDone) / Double(wantedLength) }
+            if selectedCount > 0 { return 1 } // wanted zero-byte files are complete
+            return totalLength > 0 ? Double(totalDone) / Double(totalLength) : 1
+        }
+
+        var skipped: Bool { selectedCount == 0 }
+    }
+
+    private var aggregates: [String: Aggregate] {
+        var result: [String: Aggregate] = [:]
+        let byIndex = Dictionary(uniqueKeysWithValues: rows.map { ($0.index, $0) })
+        let selected = wanted
+
+        @discardableResult
+        func walk(_ node: TorrentFileNode) -> Aggregate {
+            var aggregate = Aggregate()
+            if let fileIndex = node.fileIndex {
+                guard let row = byIndex[fileIndex] else { return aggregate }
+                let done = row.completedLength ?? 0
+                aggregate.fileCount = 1
+                aggregate.totalLength = row.length
+                aggregate.totalDone = done
+                if selected.contains(fileIndex) {
+                    aggregate.selectedCount = 1
+                    aggregate.wantedLength = row.length
+                    aggregate.wantedDone = done
                 }
-            )
-            .fixedSize()
+            } else {
+                for child in node.children ?? [] {
+                    let sub = walk(child)
+                    aggregate.selectedCount += sub.selectedCount
+                    aggregate.fileCount += sub.fileCount
+                    aggregate.wantedLength += sub.wantedLength
+                    aggregate.wantedDone += sub.wantedDone
+                    aggregate.totalLength += sub.totalLength
+                    aggregate.totalDone += sub.totalDone
+                }
+            }
+            result[node.id] = aggregate
+            return aggregate
+        }
+
+        for node in nodes { walk(node) }
+        return result
+    }
+
+    // MARK: - Rows
+
+    @ViewBuilder
+    private func row(_ node: TorrentFileNode, aggregate: Aggregate) -> some View {
+        let checkState: TriStateCheckbox.CheckState = aggregate.selectedCount == aggregate.fileCount
+            ? .on
+            : (aggregate.selectedCount == 0 ? .off : .mixed)
+        HStack(spacing: 6) {
+            if let selection {
+                TriStateCheckbox(
+                    state: checkState,
+                    // Fully deselecting this node would leave nothing selected.
+                    enabled: !(checkState == .on
+                        && selection.wrappedValue.subtracting(node.descendantIndices).isEmpty),
+                    onToggle: { selectAll in
+                        toggle(node, selectAll: selectAll, selection: selection)
+                    }
+                )
+                .fixedSize()
+            }
 
             Image(systemName: node.fileIndex == nil ? "folder" : "doc")
                 .foregroundStyle(.secondary)
@@ -213,16 +325,52 @@ struct FileSelectionList: View {
             Text(node.name)
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .foregroundStyle(aggregate.skipped ? .secondary : .primary)
             if node.fileIndex == nil, checkState == .mixed {
-                Text("\(selectedCount) of \(descendants.count)")
+                Text("\(aggregate.selectedCount) of \(aggregate.fileCount)")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            Spacer()
+            Spacer(minLength: 6)
             Text(formatBytes(node.length))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
+            if showsProgress {
+                progressCell(aggregate)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func progressCell(_ aggregate: Aggregate) -> some View {
+        HStack(spacing: 5) {
+            ProgressView(value: aggregate.progress)
+                .controlSize(.small)
+                .frame(width: 44)
+            if aggregate.skipped {
+                Text("Skipped")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(aggregate.progress.formatted(.percent.precision(.fractionLength(0))))
+                    .font(.caption)
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 100, alignment: .trailing)
+    }
+
+    private func toggle(_ node: TorrentFileNode, selectAll: Bool, selection: Binding<Set<Int>>) {
+        let descendants = node.descendantIndices
+        if selectAll {
+            selection.wrappedValue.formUnion(descendants)
+        } else {
+            let remaining = selection.wrappedValue.subtracting(descendants)
+            if !remaining.isEmpty {
+                selection.wrappedValue = remaining
+            }
         }
     }
 }

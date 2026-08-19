@@ -14,6 +14,11 @@ struct SettingsView: View {
     @AppStorage(Defaults.seedRatioLimit) private var seedRatioLimit = 0.0
     @AppStorage(Defaults.seedTimeLimitMinutes) private var seedTimeLimitMinutes = 0
     @AppStorage(Defaults.maxActiveDownloads) private var maxActiveDownloads = 0
+    @AppStorage(Defaults.autoStartTorrents) private var autoStartTorrents = false
+    @AppStorage(Defaults.keepRunningInMenuBar) private var keepRunningInMenuBar = true
+    @AppStorage(Defaults.menuBarShowsIcon) private var menuBarShowsIcon = true
+    @AppStorage(Defaults.menuBarShowsDownloadRate) private var menuBarShowsDownloadRate = true
+    @AppStorage(Defaults.menuBarShowsUploadRate) private var menuBarShowsUploadRate = true
 
     @State private var showingFolderPicker = false
 
@@ -34,10 +39,14 @@ struct SettingsView: View {
                     Text("Fetch pieces in file order — useful for previewing media early. Slightly worse for swarm health.")
                 }
                 .onChange(of: sequentialDownload) { store.applySettings() }
+                Toggle(isOn: $autoStartTorrents) {
+                    Text("Start torrents automatically")
+                    Text("Skip the window that opens when you add a torrent — it starts immediately with these settings and every file selected.")
+                }
             } header: {
                 Text("Defaults for New Torrents")
             } footer: {
-                Text("Each torrent can override these in its own settings (right-click → Settings…).")
+                Text("Each torrent can override these in the inspector's Files tab (select it and press the sidebar button).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -108,10 +117,46 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+
+            Section {
+                Toggle(isOn: $keepRunningInMenuBar) {
+                    Text("Keep running in the menu bar after closing the window")
+                    Text("Transfers carry on in the background. Turn this off to quit SpeedyTorrent when you close its window.")
+                }
+                LabeledContent("Menu bar shows") {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Toggle("Icon", isOn: $menuBarShowsIcon)
+                            .disabled(menuBarShowsIcon && !menuBarShowsDownloadRate && !menuBarShowsUploadRate)
+                        Toggle("Download speed", isOn: $menuBarShowsDownloadRate)
+                        Toggle("Upload speed", isOn: $menuBarShowsUploadRate)
+                    }
+                }
+            } header: {
+                Text("Menu Bar")
+            } footer: {
+                Text("Speeds appear only while something is transferring; the icon returns if you turn everything else off.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Integration") {
+                LabeledContent("Opens .torrent and magnet links") {
+                    if store.isDefaultHandler {
+                        Label("SpeedyTorrent", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else {
+                        HStack(spacing: 8) {
+                            Text("Another app").foregroundStyle(.secondary)
+                            Button("Make Default") { store.makeDefaultHandler() }
+                        }
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
         .frame(width: 480)
         .fixedSize(horizontal: false, vertical: true)
+        .onAppear { store.refreshDefaultHandlerStatus() }
         .fileImporter(isPresented: $showingFolderPicker, allowedContentTypes: [.folder]) { result in
             if let url = try? result.get() {
                 downloadDirectory = url.path

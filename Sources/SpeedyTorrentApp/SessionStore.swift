@@ -15,6 +15,17 @@ enum Defaults {
     static let seedRatioLimit = "seedRatioLimit"        // 0 = unlimited
     static let seedTimeLimitMinutes = "seedTimeLimitMinutes" // 0 = unlimited
     static let maxActiveDownloads = "maxActiveDownloads"     // 0 = unlimited
+    /// Skip the add-torrent sheet and start opened torrents right away.
+    static let autoStartTorrents = "autoStartTorrents"
+    /// Set by "Don't Ask Again" in the default-app prompt.
+    static let skipDefaultHandlerPrompt = "skipDefaultHandlerPrompt"
+    /// Closing the window leaves the app seeding in the menu bar.
+    static let keepRunningInMenuBar = "keepRunningInMenuBar"
+    // What the menu bar item shows. At least one must stay on, or there would
+    // be nothing left to click.
+    static let menuBarShowsIcon = "menuBarShowsIcon"
+    static let menuBarShowsDownloadRate = "menuBarShowsDownloadRate"
+    static let menuBarShowsUploadRate = "menuBarShowsUploadRate"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -29,6 +40,12 @@ enum Defaults {
             seedRatioLimit: 0.0,
             seedTimeLimitMinutes: 0,
             maxActiveDownloads: 0,
+            autoStartTorrents: false,
+            skipDefaultHandlerPrompt: false,
+            keepRunningInMenuBar: true,
+            menuBarShowsIcon: true,
+            menuBarShowsDownloadRate: true,
+            menuBarShowsUploadRate: true,
         ])
     }
 }
@@ -52,10 +69,35 @@ struct PendingTorrentAdd: Identifiable, Equatable {
     var files: [FileEntry]
     /// True once a magnet's metadata has arrived (always true for .torrent).
     var metadataResolved: Bool
+    /// Trackers known before the torrent exists, so the detail view's Trackers
+    /// tab has something to show.
+    var trackers: [String] = []
+
+    // Settings the user picks before confirming. They live here rather than in
+    // the popup so the shared detail view has one source of truth in both the
+    // pending and the live case.
+    var downloadDirectory: URL
+    var sequential: Bool
+    /// Indices to download; seeded to everything when the file list arrives.
+    var wantedFiles: Set<Int> = []
 
     var isMagnet: Bool {
         if case .magnet = source { return true }
         return false
+    }
+
+    /// The file list as tree rows. Indices are positions in the torrent's own
+    /// file array, so this must be built from the unsorted list — never from a
+    /// sorted or filtered copy.
+    var fileRows: [FileRow] {
+        files.enumerated().map {
+            FileRow(index: $0, path: $1.path, length: $1.length, completedLength: nil)
+        }
+    }
+
+    /// Total size of the files currently ticked.
+    var selectedSize: Int64 {
+        wantedFiles.reduce(Int64(0)) { $0 + (files.indices.contains($1) ? files[$1].length : 0) }
     }
 }
 
@@ -86,6 +128,13 @@ final class SessionStore {
     /// Set by the menu bar (or anything outside the main window) to ask the
     /// torrent list to open the settings sheet for a torrent.
     var settingsRequest: InfoHash?
+
+    /// Set by the menu bar to ask the torrent list to open its add-magnet
+    /// sheet. A sheet needs a window to attach to, which the popup has not got.
+    var magnetRequest = false
+
+    /// Whether this app owns both the .torrent and magnet: handlers.
+    private(set) var isDefaultHandler = true
 
     private var pollTask: Task<Void, Never>?
     private var completedHashes: Set<InfoHash> = []
@@ -125,6 +174,7 @@ final class SessionStore {
         let session = TorrentSession(configuration: configuration)
         self.session = session
         self.activeEncryptionPolicy = configuration.encryptionPolicy
+        checkDefaultHandler()
 
         pollTask = Task {
             await session.restore()
@@ -158,6 +208,53 @@ final class SessionStore {
                 self.dhtNodeCount = await session.dhtNodeCount()
                 self.stats = await session.statistics()
                 try? await Task.sleep(for: .seconds(1))
+            }
+        }
+    }
+
+    // MARK: - Default app for torrents and magnet links
+
+    /// Checks the handlers shortly after launch and offers to claim them,
+    /// unless the user has silenced the prompt. Once per launch.
+    private func checkDefaultHandler() {
+        // A `swift run` build has no bundle to register.
+        guard DefaultHandler.isRegisterableBundle else { return }
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            self.refreshDefaultHandlerStatus()
+            guard ProcessInfo.processInfo.environment["SPEEDYTORRENT_FORCE_HANDLER_PROMPT"] == nil else {
+                DefaultHandler.presentPrompt { _ in }
+                return
+            }
+            guard !self.isDefaultHandler,
+                  !UserDefaults.standard.bool(forKey: Defaults.skipDefaultHandlerPrompt)
+            else { return }
+            DefaultHandler.presentPrompt { choice in
+                switch choice {
+                case .claim: self.makeDefaultHandler()
+                case .later: break
+                case .never:
+                    UserDefaults.standard.set(true, forKey: Defaults.skipDefaultHandlerPrompt)
+                }
+            }
+        }
+    }
+
+    /// Re-reads the handler status (it can change in System Settings while
+    /// the app runs).
+    func refreshDefaultHandlerStatus() {
+        isDefaultHandler = !DefaultHandler.isRegisterableBundle || DefaultHandler.handlesEverything
+    }
+
+    func makeDefaultHandler() {
+        Task {
+            let error = await DefaultHandler.claimAll()
+            self.refreshDefaultHandlerStatus()
+            // macOS asks for confirmation on some of these changes; a decline
+            // surfaces as an error, so only complain if it really didn't take.
+            if let error, !self.isDefaultHandler {
+                self.lastActionError = "Could not set SpeedyTorrent as the default app: "
+                    + error.localizedDescription
             }
         }
     }
@@ -226,6 +323,10 @@ final class SessionStore {
             pendingAdds[index].totalSize = meta.totalLength
             pendingAdds[index].files = meta.files
             pendingAdds[index].metadataResolved = true
+            // Select everything in the same mutation that publishes the files:
+            // a second pass would briefly render "0 of N selected" with the Add
+            // button disabled.
+            pendingAdds[index].wantedFiles = Set(meta.files.indices)
         }
     }
 
@@ -253,7 +354,21 @@ final class SessionStore {
 
     // MARK: - Adding torrents (via the per-torrent settings sheet)
 
+    /// Whether opened torrents skip the add sheet and start immediately with
+    /// the app-wide defaults ("Start torrents automatically" in Settings).
+    private var startsTorrentsAutomatically: Bool {
+        UserDefaults.standard.bool(forKey: Defaults.autoStartTorrents)
+    }
+
+    /// The download folder new torrents land in unless the user picks another.
+    private var defaultDownloadDirectory: URL {
+        URL(fileURLWithPath: UserDefaults.standard.string(forKey: Defaults.downloadDirectory)
+            ?? NSHomeDirectory() + "/Downloads")
+    }
+
     /// Queues a .torrent file; the settings sheet confirms the actual add.
+    /// With auto-start on it is added straight away instead, with every file
+    /// selected.
     func addTorrentFile(at url: URL) {
         do {
             let data = try Data(contentsOf: url)
@@ -264,13 +379,29 @@ final class SessionStore {
                 lastActionError = "Could not add torrent: it is already added."
                 return
             }
+            if startsTorrentsAutomatically {
+                let directory = defaultDownloadDirectory
+                let sequential = UserDefaults.standard.bool(forKey: Defaults.sequentialDownload)
+                run("add torrent") { session in
+                    _ = try await session.addTorrent(
+                        fileData: data,
+                        downloadDirectory: directory,
+                        sequential: sequential
+                    )
+                }
+                return
+            }
             pendingAdds.append(PendingTorrentAdd(
                 source: .torrentFile(data: data),
                 infoHash: meta.info.infoHash,
                 displayName: meta.info.name,
                 totalSize: meta.info.totalLength,
                 files: meta.info.files,
-                metadataResolved: true
+                metadataResolved: true,
+                trackers: meta.announceTiers.flatMap { $0 },
+                downloadDirectory: defaultDownloadDirectory,
+                sequential: UserDefaults.standard.bool(forKey: Defaults.sequentialDownload),
+                wantedFiles: Set(meta.info.files.indices)
             ))
         } catch {
             lastActionError = "Could not read torrent file: \(friendly(error))"
@@ -279,7 +410,9 @@ final class SessionStore {
 
     /// Queues a magnet link and immediately begins fetching its metadata in the
     /// background, so the add sheet can fill in the file list before the user
-    /// confirms. The settings sheet confirms the actual add.
+    /// confirms. The settings sheet confirms the actual add. With auto-start on
+    /// there is no sheet to fill in, so the magnet is added as a download right
+    /// away and its metadata resolves in place.
     func addMagnet(_ string: String) {
         guard let magnet = MagnetLink(string: string) else {
             lastActionError = "Could not add magnet: that is not a valid magnet link."
@@ -291,13 +424,28 @@ final class SessionStore {
             lastActionError = "Could not add magnet: it is already added."
             return
         }
+        if startsTorrentsAutomatically {
+            let directory = defaultDownloadDirectory
+            let sequential = UserDefaults.standard.bool(forKey: Defaults.sequentialDownload)
+            run("add magnet") { session in
+                _ = try await session.addMagnet(
+                    string,
+                    downloadDirectory: directory,
+                    sequential: sequential
+                )
+            }
+            return
+        }
         pendingAdds.append(PendingTorrentAdd(
             source: .magnet(uri: string),
             infoHash: magnet.infoHash,
             displayName: magnet.displayName ?? magnet.infoHash.hexString,
             totalSize: nil,
             files: [],
-            metadataResolved: false
+            metadataResolved: false,
+            trackers: magnet.trackers,
+            downloadDirectory: defaultDownloadDirectory,
+            sequential: UserDefaults.standard.bool(forKey: Defaults.sequentialDownload)
         ))
         let id = pendingAdds.last!.id
         run("start fetching metadata") { [weak self] session in
@@ -315,20 +463,18 @@ final class SessionStore {
         snapshots.contains { $0.infoHash == infoHash }
     }
 
-    func confirmPendingAdd(
-        id: PendingTorrentAdd.ID,
-        directory: URL,
-        sequential: Bool,
-        wantedFiles: Set<Int>?
-    ) {
+    /// Starts the download with whatever settings the record carries.
+    func confirmPendingAdd(id: PendingTorrentAdd.ID) {
         guard let index = pendingAdds.firstIndex(where: { $0.id == id }) else { return }
         let pending = pendingAdds.remove(at: index)
+        let directory = pending.downloadDirectory
+        let sequential = pending.sequential
         // A full selection is stored as nil (the default). File selection only
         // applies once files are known (immediately for .torrent, after
         // metadata for magnets).
-        let wanted = pending.files.isEmpty
+        let wanted = pending.files.isEmpty || pending.wantedFiles.count == pending.files.count
             ? nil
-            : wantedFiles.flatMap { $0.count == pending.files.count ? nil : $0 }
+            : pending.wantedFiles
         run("add torrent") { session in
             switch pending.source {
             case .torrentFile(let data):
@@ -347,6 +493,28 @@ final class SessionStore {
                 )
             }
         }
+    }
+
+    /// The pending record the detail view edits (nil once confirmed/dismissed).
+    func pendingAdd(id: PendingTorrentAdd.ID) -> PendingTorrentAdd? {
+        pendingAdds.first { $0.id == id }
+    }
+
+    func setPendingDirectory(_ directory: URL, id: PendingTorrentAdd.ID) {
+        mutatePending(id) { $0.downloadDirectory = directory }
+    }
+
+    func setPendingSequential(_ sequential: Bool, id: PendingTorrentAdd.ID) {
+        mutatePending(id) { $0.sequential = sequential }
+    }
+
+    func setPendingWantedFiles(_ wanted: Set<Int>, id: PendingTorrentAdd.ID) {
+        mutatePending(id) { $0.wantedFiles = wanted }
+    }
+
+    private func mutatePending(_ id: PendingTorrentAdd.ID, _ body: (inout PendingTorrentAdd) -> Void) {
+        guard let index = pendingAdds.firstIndex(where: { $0.id == id }) else { return }
+        body(&pendingAdds[index])
     }
 
     func fileStatuses(for infoHash: InfoHash) async -> [TorrentFileStatus] {
@@ -390,6 +558,10 @@ final class SessionStore {
 
     func requestSettings(for infoHash: InfoHash) {
         settingsRequest = infoHash
+    }
+
+    func requestMagnetSheet() {
+        magnetRequest = true
     }
 
     func setSequential(_ sequential: Bool, for infoHash: InfoHash) {
@@ -529,6 +701,15 @@ extension TorrentState {
         case .paused: "Paused"
         case .queued: "Queued"
         case .failed: "Error"
+        }
+    }
+
+    /// Whether the torrent is doing work right now, as opposed to sitting
+    /// paused, queued behind another download, or stopped on an error.
+    var isActive: Bool {
+        switch self {
+        case .downloading, .seeding, .checking, .moving, .fetchingMetadata: true
+        case .paused, .queued, .failed: false
         }
     }
 

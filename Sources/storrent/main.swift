@@ -11,8 +11,20 @@ Usage:
   storrent create <file-or-dir> [tracker-url]
   storrent download <file.torrent> [output-dir] [--sequential] [--port N]
   storrent seed <file.torrent> <content-parent-dir> [--port N]
-  storrent magnet "<magnet-uri>" [output-dir]
+  storrent magnet "<magnet-uri>" [output-dir] [--port N] [--encryption off|prefer|require]
 """
+
+/// `--encryption off|prefer|require` (default: prefer, matching the app).
+func encryptionArgument(_ arguments: [String]) -> EncryptionPolicy {
+    guard let index = arguments.firstIndex(of: "--encryption"),
+          arguments.indices.contains(index + 1)
+    else { return .preferred }
+    switch arguments[index + 1].lowercased() {
+    case "off", "disabled", "none": return .disabled
+    case "require", "required": return .required
+    default: return .preferred
+    }
+}
 
 func formatBytes(_ bytes: Int64) -> String {
     let units = ["B", "KiB", "MiB", "GiB"]
@@ -221,10 +233,13 @@ case "magnet":
         : URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
     let port: UInt16 = arguments.firstIndex(of: "--port")
         .flatMap { arguments.indices.contains($0 + 1) ? UInt16(arguments[$0 + 1]) : nil } ?? 6893
+    let policy = encryptionArgument(arguments)
     let session = TorrentSession(configuration: .init(
         downloadDirectory: outputDir,
-        listenPort: port
+        listenPort: port,
+        encryptionPolicy: policy
     ))
+    print("encryption: \(policy.rawValue)")
     do {
         _ = try await session.startListening()
     } catch {

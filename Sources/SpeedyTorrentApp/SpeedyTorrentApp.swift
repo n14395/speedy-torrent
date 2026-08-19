@@ -54,8 +54,10 @@ struct SpeedyTorrentApp: App {
 
 /// Handles .torrent document opens from Finder/Dock and flushes engine state
 /// (resume data, tracker "stopped" announces) before the process exits.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var store: SessionStore?
+    private var terminationReplied = false
 
     func application(_ application: NSApplication, open urls: [URL]) {
         Task { @MainActor in
@@ -67,14 +69,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let store else { return .terminateNow }
+        // Flush resume data and say goodbye to trackers…
         Task { @MainActor in
             await store.shutdown()
-            sender.reply(toApplicationShouldTerminate: true)
+            self.replyToTerminate(sender)
+        }
+        // …but quit regardless if that takes too long. Waiting on the network
+        // here is what used to make Cmd-Q look like it did nothing.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            self.replyToTerminate(sender)
         }
         return .terminateLater
     }
 
+    private func replyToTerminate(_ sender: NSApplication) {
+        guard !terminationReplied else { return }
+        terminationReplied = true
+        sender.reply(toApplicationShouldTerminate: true)
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false // keep running in the menu bar
+        // Off = closing the last window quits; on = keep seeding in the menu bar.
+        !UserDefaults.standard.bool(forKey: Defaults.keepRunningInMenuBar)
     }
 }

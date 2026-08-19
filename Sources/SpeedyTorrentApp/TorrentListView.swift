@@ -37,8 +37,10 @@ struct TorrentListView: View {
     @State private var showingMagnetSheet = false
     @State private var magnetText = ""
     @State private var pendingRemoval: [TorrentSnapshot] = []
-    @State private var editingTorrent: TorrentSnapshot?
     @State private var showInspector = false
+    /// Which inspector tab is showing. Owned here so it survives selection
+    /// changes, and kept separate from the add sheet's own tab state.
+    @State private var inspectorTab: TorrentDetailTab = .files
     @State private var sortOrder: [KeyPathComparator<TorrentSnapshot>] =
         [KeyPathComparator(\.queuePosition)]
     @State private var searchText = ""
@@ -111,9 +113,9 @@ struct TorrentListView: View {
             toolbarRefresh += 1
         }
         .inspector(isPresented: $showInspector) {
-            InspectorPane(selection: selection)
+            InspectorPane(selection: selection, tab: $inspectorTab)
                 .environment(store)
-                .inspectorColumnWidth(min: 300, ideal: 420, max: 600)
+                .inspectorColumnWidth(min: 360, ideal: 460, max: 640)
         }
         .fileImporter(
             isPresented: $showingFileImporter,
@@ -127,25 +129,27 @@ struct TorrentListView: View {
             }
         }
         .sheet(isPresented: $showingMagnetSheet) { magnetSheet }
+        // Presented by id, not by value: the pending record now carries the
+        // user's settings, so binding to the value would re-present the sheet
+        // on every edit.
         .sheet(item: Binding(
-            get: { store.currentPendingAdd },
+            get: { store.currentPendingAdd.map { PendingAddID(id: $0.id) } },
             set: { newValue in
                 if newValue == nil, let current = store.currentPendingAdd {
                     store.dismissPendingAdd(id: current.id)
                 }
             }
         )) { pending in
-            AddTorrentSheet(pending: pending)
+            AddTorrentSheet(pendingID: pending.id)
                 .environment(store)
         }
-        .sheet(item: $editingTorrent) { snapshot in
-            EditTorrentSheet(snapshot: snapshot)
-                .environment(store)
-        }
-        .onChange(of: store.settingsRequest) {
-            guard let hash = store.settingsRequest else { return }
-            store.settingsRequest = nil
-            editingTorrent = store.snapshots.first { $0.infoHash == hash }
+        .onChange(of: store.settingsRequest) { consumeSettingsRequest() }
+        .onChange(of: store.magnetRequest) { consumeMagnetRequest() }
+        .onAppear {
+            // The menu bar sets the request before opening this window, so a
+            // change notification alone would miss it.
+            consumeSettingsRequest()
+            consumeMagnetRequest()
         }
         .confirmationDialog(
             removalTitle,
@@ -186,6 +190,26 @@ struct TorrentListView: View {
             torrents.forEach { store.addTorrentFile(at: $0) }
             return !torrents.isEmpty
         }
+    }
+
+    /// Selects a torrent and reveals its settings in the inspector — the one
+    /// place per-torrent settings live now.
+    private func showSettings(for infoHash: InfoHash) {
+        selection = [infoHash]
+        inspectorTab = .files
+        showInspector = true
+    }
+
+    private func consumeSettingsRequest() {
+        guard let hash = store.settingsRequest else { return }
+        store.settingsRequest = nil
+        showSettings(for: hash)
+    }
+
+    private func consumeMagnetRequest() {
+        guard store.magnetRequest else { return }
+        store.magnetRequest = false
+        showingMagnetSheet = true
     }
 
     private var removalTitle: String {
@@ -365,7 +389,7 @@ struct TorrentListView: View {
             Button("Show in Finder") { selected.forEach { store.revealInFinder($0.infoHash) } }
             Button("Verify Data") { selected.forEach { store.recheck($0.infoHash) } }
             if selected.count == 1 {
-                Button("Settings…") { editingTorrent = selected[0] }
+                Button("Settings…") { showSettings(for: selected[0].infoHash) }
             }
             // Reordering is only meaningful in the queue-priority order.
             if selected.count == 1, isQueueOrdered, searchText.isEmpty, statusFilter == .all {
@@ -445,15 +469,6 @@ struct TorrentListView: View {
             .help("Show the downloaded files in Finder")
             .id(toolbarRefresh)
             .disabled(selection.isEmpty)
-
-            Button {
-                editingTorrent = store.snapshots.first { selection.contains($0.infoHash) }
-            } label: {
-                Label("Torrent Settings", systemImage: "gearshape")
-            }
-            .help("Per-torrent settings (download location, piece order)")
-            .id(toolbarRefresh)
-            .disabled(selection.count != 1)
 
             Button {
                 pendingRemoval = store.snapshots.filter { selection.contains($0.infoHash) }

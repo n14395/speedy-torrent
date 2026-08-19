@@ -19,7 +19,27 @@ struct ResumeData: Codable, Sendable {
     var fileStamps: [String: Double]
 }
 
-/// On-disk layout: `<base>/<infohash>/meta.torrent` + `resume.json`.
+/// A magnet whose metadata hasn't arrived yet. Saved so torrents still
+/// "Fetching metadata" survive a relaunch instead of vanishing; replaced by
+/// `meta.torrent` + `resume.json` once the info dictionary is verified.
+struct MagnetRecord: Codable, Sendable {
+    var version = 1
+    var infoHashHex: String
+    var displayName: String?
+    var trackers: [String]
+    var downloadDirectory: String
+    var sequential: Bool
+    var addedAt: Double
+}
+
+/// One restored item, in queue order.
+enum RestoreEntry: Sendable {
+    case torrent(data: Data, resume: ResumeData?)
+    case magnet(MagnetRecord)
+}
+
+/// On-disk layout: `<base>/<infohash>/meta.torrent` + `resume.json`, or
+/// `magnet.json` while a magnet is still resolving.
 /// All operations are synchronous and cheap; call from the session actor.
 struct PersistenceStore: Sendable {
     let baseURL: URL
@@ -51,6 +71,22 @@ struct PersistenceStore: Sendable {
         try? FileManager.default.removeItem(at: directory(for: infoHash))
     }
 
+    func saveMagnet(_ record: MagnetRecord, for infoHash: InfoHash) {
+        let dir = directory(for: infoHash)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if let encoded = try? JSONEncoder().encode(record) {
+            try? encoded.write(to: dir.appendingPathComponent("magnet.json"))
+        }
+    }
+
+    /// Drops just the pending-magnet marker, keeping the torrent state that
+    /// replaces it.
+    func removeMagnet(for infoHash: InfoHash) {
+        try? FileManager.default.removeItem(
+            at: directory(for: infoHash).appendingPathComponent("magnet.json")
+        )
+    }
+
     func saveStats(_ stats: StatsFile) {
         if let encoded = try? JSONEncoder().encode(stats) {
             try? encoded.write(to: baseURL.appendingPathComponent("stats.json"))
@@ -74,32 +110,38 @@ struct PersistenceStore: Sendable {
             .flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
     }
 
-    /// Entries ordered by the saved queue order; unknown ones follow by
-    /// added-date.
-    func loadAll() -> [(torrentData: Data, resume: ResumeData?)] {
+    /// Torrents and pending magnets, ordered by the saved queue order;
+    /// unknown ones follow by added-date.
+    func loadEntries() -> [RestoreEntry] {
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: baseURL, includingPropertiesForKeys: nil
         ) else { return [] }
         let queueIndex = Dictionary(
             uniqueKeysWithValues: loadQueueOrder().enumerated().map { ($1, $0) }
         )
-        var results: [(Data, ResumeData?, Int, Double)] = []
+        var results: [(RestoreEntry, Int, Double)] = []
         for entry in entries where entry.hasDirectoryPath {
-            guard let torrentData = try? Data(contentsOf: entry.appendingPathComponent("meta.torrent")) else {
-                continue
+            let position = queueIndex[entry.lastPathComponent] ?? .max
+            if let torrentData = try? Data(contentsOf: entry.appendingPathComponent("meta.torrent")) {
+                let resume = (try? Data(contentsOf: entry.appendingPathComponent("resume.json")))
+                    .flatMap { try? JSONDecoder().decode(ResumeData.self, from: $0) }
+                results.append((.torrent(data: torrentData, resume: resume), position, resume?.addedAt ?? 0))
+            } else if let magnetData = try? Data(contentsOf: entry.appendingPathComponent("magnet.json")),
+                      let record = try? JSONDecoder().decode(MagnetRecord.self, from: magnetData) {
+                results.append((.magnet(record), position, record.addedAt))
             }
-            let resume = (try? Data(contentsOf: entry.appendingPathComponent("resume.json")))
-                .flatMap { try? JSONDecoder().decode(ResumeData.self, from: $0) }
-            results.append((
-                torrentData,
-                resume,
-                queueIndex[entry.lastPathComponent] ?? .max,
-                resume?.addedAt ?? 0
-            ))
         }
         return results
-            .sorted { ($0.2, $0.3) < ($1.2, $1.3) }
-            .map { ($0.0, $0.1) }
+            .sorted { ($0.1, $0.2) < ($1.1, $1.2) }
+            .map(\.0)
+    }
+
+    /// Resolved torrents only (magnets excluded).
+    func loadAll() -> [(torrentData: Data, resume: ResumeData?)] {
+        loadEntries().compactMap { entry in
+            guard case .torrent(let data, let resume) = entry else { return nil }
+            return (torrentData: data, resume: resume)
+        }
     }
 }
 

@@ -31,7 +31,8 @@ actor MagnetController {
     private var resolvedData: Data?
     private var stopped = false
     private var mainTask: Task<Void, Never>?
-    private let addedAt = Date().timeIntervalSince1970
+    /// Preserved across restarts for restored magnets.
+    nonisolated let addedAt: Double
 
     init(
         magnet: MagnetLink,
@@ -40,9 +41,11 @@ actor MagnetController {
         downloadDirectory: URL,
         sequential: Bool,
         encryptionPolicy: EncryptionPolicy = .disabled,
+        addedAt: Double = Date().timeIntervalSince1970,
         discoverPeers: (@Sendable () async -> [PeerAddress])? = nil,
         onResolved: (@Sendable (Data) async -> Void)? = nil
     ) {
+        self.addedAt = addedAt
         self.magnet = magnet
         self.sessionPeerID = sessionPeerID
         self.listenPort = listenPort
@@ -163,15 +166,34 @@ actor MagnetController {
         }
     }
 
-    /// One peer's metadata-fetch conversation.
+    /// One peer's metadata fetch, mirroring the download path's encryption
+    /// policy: try MSE first, then retry in plaintext for peers that can't do
+    /// it (without the retry, magnets stall forever in a plaintext swarm).
     private func fetchMetadata(from address: PeerAddress) async {
+        if await attemptFetch(
+            from: address,
+            encrypt: encryptionPolicy != .disabled,
+            require: encryptionPolicy == .required
+        ) {
+            return
+        }
+        if encryptionPolicy == .preferred, !resolved, !stopped {
+            _ = await attemptFetch(from: address, encrypt: false, require: false)
+        }
+    }
+
+    /// One peer's metadata-fetch conversation. Returns false when the
+    /// connection failed outright, so the caller may retry differently.
+    private func attemptFetch(
+        from address: PeerAddress, encrypt: Bool, require: Bool
+    ) async -> Bool {
         let connection = PeerConnection(address: address)
         defer { connection.close() }
         do {
             try await connection.start()
-            if encryptionPolicy != .disabled {
+            if encrypt {
                 _ = try await connection.mseInitiatorHandshake(
-                    infoHash: magnet.infoHash, requireEncryption: encryptionPolicy == .required
+                    infoHash: magnet.infoHash, requireEncryption: require
                 )
             }
             try await connection.sendHandshake(Handshake(
@@ -181,7 +203,7 @@ actor MagnetController {
             guard theirs.infoHash == magnet.infoHash,
                   theirs.supportsExtensions,
                   theirs.peerID != sessionPeerID
-            else { return }
+            else { return true } // reachable, just not useful — don't retry
             try await connection.send(.extended(id: 0, payload: ExtensionHandshake.encode(
                 metadataSize: nil, listenPort: listenPort
             )))
@@ -201,7 +223,7 @@ actor MagnetController {
                           let utID = parsed.utMetadataID,
                           let size = parsed.metadataSize,
                           size > 0, size <= UTMetadata.maxMetadataSize
-                    else { return }
+                    else { return true }
                     theirUTMetadataID = utID
                     metadataSize = size
                     requested = 0
@@ -227,16 +249,16 @@ actor MagnetController {
                         }
                         guard full.count == metadataSize,
                               InfoHash(hashing: full) == magnet.infoHash
-                        else { return } // corrupt metadata from this peer
+                        else { return true } // corrupt metadata from this peer
                         await deliver(full)
-                        return
+                        return true
                     }
                     requested += 1
                     try await connection.send(.extended(
                         id: utID, payload: UTMetadata.request(piece: requested)
                     ))
                 case .reject:
-                    return
+                    return true
                 case .request:
                     // We have nothing to serve yet.
                     try await connection.send(.extended(
@@ -244,8 +266,11 @@ actor MagnetController {
                     ))
                 }
             }
+            return true
         } catch {
-            // Connection failed or timed out; the dial loop tries others.
+            // Connection failed or timed out: worth one retry with different
+            // encryption; failing that, the dial loop tries other peers.
+            return false
         }
     }
 

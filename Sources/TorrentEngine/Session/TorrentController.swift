@@ -311,7 +311,11 @@ actor TorrentController {
         await store.close()
         await saveResume()
         if wasActive {
-            await trackers.announceAll(makeAnnounceRequest(event: .stopped))
+            // Telling the tracker we've stopped is a courtesy; it must never
+            // delay quitting, so give it a short budget and move on.
+            let trackers = self.trackers
+            let request = makeAnnounceRequest(event: .stopped)
+            await withDeadline(seconds: 2) { await trackers.announceAll(request) }
         }
     }
 
