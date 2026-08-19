@@ -3,6 +3,43 @@ import SwiftUI
 import UniformTypeIdentifiers
 import TorrentEngine
 
+/// The popup's palette and metrics.
+///
+/// The panel paints itself opaquely rather than sitting on the menu's vibrant
+/// material: vibrancy let the desktop tint every fill, which is what made the
+/// shipped popup read warm and washed-out next to the design. Every surface
+/// above the panel — tiles, the torrent card, pills, round buttons — is the
+/// same single step of `primary`, and hover adds that step again.
+private enum Popup {
+    static let corner: CGFloat = 8
+    static let fill = Color.primary.opacity(0.10)
+    static let hover = Color.primary.opacity(0.11)
+    static let separator = Color.primary.opacity(0.15)
+    static let ringTrack = Color.primary.opacity(0.21)
+
+    /// The panel's slight lift towards the top of the window.
+    static let background = LinearGradient(
+        colors: [
+            Color(nsColor: appearanceColor(dark: 0x1A242C, light: 0xF7F8FA)),
+            Color(nsColor: appearanceColor(dark: 0x181D21, light: 0xEFF1F4)),
+        ],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+
+    private static func appearanceColor(dark: UInt32, light: UInt32) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let rgb = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+            return NSColor(
+                srgbRed: Double((rgb >> 16) & 0xFF) / 255,
+                green: Double((rgb >> 8) & 0xFF) / 255,
+                blue: Double(rgb & 0xFF) / 255,
+                alpha: 1
+            )
+        }
+    }
+}
+
 /// The menu bar popup, laid out like a Control Center panel: two aggregate
 /// rate tiles over a card of torrent rows, then a row of controls. Each row's
 /// progress ring doubles as its pause/resume button, so the common actions no
@@ -45,6 +82,7 @@ struct MenuBarView: View {
         }
         .padding(10)
         .frame(width: 320)
+        .background(Popup.background)
     }
 
     // MARK: - Aggregate rates
@@ -85,31 +123,45 @@ struct MenuBarView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 22)
-            .background(.quaternary, in: .rect(cornerRadius: 9))
+            .background(Popup.fill, in: .rect(cornerRadius: Popup.corner))
         } else {
             VStack(spacing: 0) {
                 ForEach(Array(visible.enumerated()), id: \.element.id) { index, snapshot in
-                    if index > 0 { Divider().opacity(0.5) }
+                    if index > 0 { separator }
                     row(snapshot)
                 }
                 if overflow > 0 {
-                    Divider().opacity(0.5)
+                    separator
                     moreRow
                 }
             }
-            .background(.quaternary, in: .rect(cornerRadius: 9))
+            .background(Popup.fill)
+            // Clipped rather than filled through a shape so a hovered first or
+            // last row follows the card's corners instead of squaring them off.
+            .clipShape(.rect(cornerRadius: Popup.corner))
         }
+    }
+
+    /// A hairline between rows. `Divider()` is tuned for the vibrant menu
+    /// material and all but vanishes against the opaque panel.
+    private var separator: some View {
+        Rectangle()
+            .fill(Popup.separator)
+            .frame(height: 0.5)
     }
 
     private func row(_ snapshot: TorrentSnapshot) -> some View {
         let isHovered = hovered == snapshot.infoHash
-        return HStack(spacing: 9) {
+        return HStack(spacing: 10.5) {
             ProgressRing(snapshot: snapshot, showsControl: isHovered) {
                 toggle(snapshot)
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(snapshot.name)
                     .font(.system(size: 13))
+                    // A paused torrent recedes: the whole row drops to
+                    // secondary rather than leading with a full-strength title.
+                    .foregroundStyle(snapshot.state == .paused ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary))
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Text(subtitle(snapshot))
@@ -120,7 +172,7 @@ struct MenuBarView: View {
             Spacer(minLength: 4)
             VStack(alignment: .trailing, spacing: 1) {
                 Text(rateText(snapshot))
-                    .font(.system(size: 11.5, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(rateTint(snapshot))
                     .monospacedDigit()
                 if let detail = trailingDetail(snapshot) {
@@ -132,9 +184,12 @@ struct MenuBarView: View {
             }
             .fixedSize(horizontal: true, vertical: false)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(isHovered ? Color.primary.opacity(0.06) : .clear)
+        // A hair more room on the leading edge: the ring is round, so it
+        // needs it to sit as far from the card's edge as the rate text does.
+        .padding(.leading, 12)
+        .padding(.trailing, 10)
+        .padding(.vertical, 7.5)
+        .background(isHovered ? Popup.hover : .clear)
         .contentShape(.rect)
         .onTapGesture { showSettings(snapshot.infoHash) }
         .onHover { hovering in
@@ -157,7 +212,7 @@ struct MenuBarView: View {
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.tertiary)
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .contentShape(.rect)
         .onTapGesture { openMainWindow() }
@@ -237,9 +292,9 @@ struct MenuBarView: View {
     private func subtitle(_ snapshot: TorrentSnapshot) -> String {
         switch snapshot.state {
         case .downloading:
-            let done = formatBytes(min(snapshot.completedLength, snapshot.wantedLength))
+            let done = min(snapshot.completedLength, snapshot.wantedLength)
             let peers = "\(snapshot.peerCount) peer" + (snapshot.peerCount == 1 ? "" : "s")
-            return "\(done) of \(formatBytes(snapshot.wantedLength)) · \(peers)"
+            return "\(progressText(done: done, of: snapshot.wantedLength)) · \(peers)"
         case .seeding:
             return "Seeding · ratio \(String(format: "%.2f", snapshot.ratio))"
         case .failed:
@@ -278,6 +333,17 @@ struct MenuBarView: View {
             return nil
         }
     }
+}
+
+/// "2.45 of 3.6 GB" rather than "2.45 GB of 3.6 GB" — in a 320pt row the unit
+/// only earns its place once when both halves land on the same one.
+private func progressText(done: Int64, of total: Int64) -> String {
+    let doneText = formatBytes(done)
+    let totalText = formatBytes(total)
+    if let unit = totalText.split(separator: " ").last, doneText.hasSuffix(" \(unit)") {
+        return "\(doneText.dropLast(unit.count + 1)) of \(totalText)"
+    }
+    return "\(doneText) of \(totalText)"
 }
 
 private func percent(_ snapshot: TorrentSnapshot) -> String {
@@ -325,15 +391,18 @@ private struct RateTile: View {
         let parts = splitRate(rate)
         return ZStack(alignment: .topLeading) {
             if !isIdle { sparkline }
-            VStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 3) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 4.5) {
+                    // Only the word carries the tint — the arrow stays at full
+                    // strength, which is what keeps the two tiles legible when
+                    // a sparkline runs underneath them.
                     Image(systemName: icon)
                         .font(.system(size: 8, weight: .bold))
                     Text(title.uppercased())
                         .font(.system(size: 10, weight: .medium))
                         .tracking(0.4)
+                        .foregroundStyle(tint)
                 }
-                .foregroundStyle(tint)
 
                 HStack(alignment: .firstTextBaseline, spacing: 2) {
                     Text(parts.value)
@@ -344,12 +413,15 @@ private struct RateTile: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.top, 8)
+            .padding(.horizontal, 11)
+            .padding(.top, 9.5)
         }
-        .frame(height: 56)
-        .frame(maxWidth: .infinity)
-        .background(.quaternary, in: .rect(cornerRadius: 9))
+        .frame(height: 58)
+        // Leading, not centred: an idle tile has no sparkline to stretch the
+        // stack, and the readout has to stay flush with the tile's edge either
+        // way.
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Popup.fill, in: .rect(cornerRadius: Popup.corner))
     }
 
     private var sparkline: some View {
@@ -359,13 +431,14 @@ private struct RateTile: View {
                 y: .value("Rate", sample[keyPath: value])
             )
             .foregroundStyle(tint.opacity(0.16))
-            .interpolationMethod(.monotone)
+            .interpolationMethod(.linear)
             LineMark(
                 x: .value("Time", sample.time),
                 y: .value("Rate", sample[keyPath: value])
             )
             .foregroundStyle(tint)
-            .interpolationMethod(.monotone)
+            .lineStyle(StrokeStyle(lineWidth: 1.5, lineJoin: .round))
+            .interpolationMethod(.linear)
         }
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
@@ -405,20 +478,26 @@ private struct ProgressRing: View {
         }
     }
 
+    /// Inset by half the stroke so the ring's ink sits inside its frame, which
+    /// is what lets the row's padding read as the design's 12pt.
+    private static let stroke: CGFloat = 2.5
+
     private var ring: some View {
         ZStack {
             Circle()
-                .stroke(.quaternary, lineWidth: 2.5)
+                .inset(by: Self.stroke / 2)
+                .stroke(Popup.ringTrack, lineWidth: Self.stroke)
             Circle()
+                .inset(by: Self.stroke / 2)
                 .trim(from: 0, to: min(1, max(0, snapshot.progress)))
                 .stroke(
                     snapshot.state.tint,
-                    style: StrokeStyle(lineWidth: 2.5, lineCap: .round)
+                    style: StrokeStyle(lineWidth: Self.stroke, lineCap: .round)
                 )
                 .rotationEffect(.degrees(-90))
             glyph
         }
-        .frame(width: 30, height: 30)
+        .frame(width: 27, height: 27)
         .contentShape(.circle)
     }
 
@@ -430,7 +509,7 @@ private struct ProgressRing: View {
                 .foregroundStyle(snapshot.state.tint)
         } else if snapshot.state == .downloading {
             Text(percent(snapshot))
-                .font(.system(size: 9.5, weight: .semibold))
+                .font(.system(size: 9, weight: .semibold))
                 .monospacedDigit()
         } else {
             Image(systemName: glyphName)
@@ -473,8 +552,8 @@ private struct PillLabel: View {
         .padding(.horizontal, 11)
         .padding(.vertical, 6)
         .background {
-            Capsule().fill(.quaternary)
-            if hovering { Capsule().fill(.primary.opacity(0.07)) }
+            Capsule().fill(Popup.fill)
+            if hovering { Capsule().fill(Popup.hover) }
         }
         .contentShape(.capsule)
     }
@@ -534,12 +613,15 @@ private struct CircleButton: View {
                 .foregroundStyle(prominent ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
                 .frame(width: 28, height: 28)
                 .background {
+                    // The design's blue, not the system accent: the popup's
+                    // other blue (download rate, progress) is `.blue`, and a
+                    // non-blue accent left this button as the odd one out.
                     if prominent {
-                        Circle().fill(Color.accentColor)
+                        Circle().fill(Color.blue)
                     } else {
-                        Circle().fill(.quaternary)
+                        Circle().fill(Popup.fill)
                     }
-                    if hovering { Circle().fill(.primary.opacity(0.07)) }
+                    if hovering { Circle().fill(Popup.hover) }
                 }
                 .contentShape(.circle)
         }
