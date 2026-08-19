@@ -163,16 +163,13 @@ struct TorrentDetailView: View {
                 .background(Surface.fill)
                 .clipShape(.rect(cornerRadius: Surface.corner))
 
-            // Where and how this torrent downloads — one card, pinned below the
-            // list so the files get every spare point of height.
-            VStack(alignment: .leading, spacing: 8) {
-                locationRow
-                SurfaceSeparator()
-                sequentialToggle
-            }
-            .padding(10)
-            .background(Surface.fill)
-            .clipShape(.rect(cornerRadius: Surface.corner))
+            // Where this torrent downloads — one line, pinned below the list
+            // so the files get every spare point of height.
+            locationRow
+                .padding(.horizontal, 12)
+                .frame(height: 30)
+                .background(Surface.fill)
+                .clipShape(.rect(cornerRadius: Surface.corner))
         }
         .padding(.horizontal, 12)
         .padding(.bottom, 12)
@@ -202,34 +199,27 @@ struct TorrentDetailView: View {
 
     private var locationRow: some View {
         let path = (currentDirectory.path as NSString).abbreviatingWithTildeInPath
-        return ViewThatFits(in: .horizontal) {
-            HStack {
-                Text("Location")
-                Spacer()
-                Text(path)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .foregroundStyle(.secondary)
-                chooseButton
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("Location")
-                    Spacer()
-                    chooseButton
-                }
-                Text(path)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+        return HStack(spacing: 8) {
+            Image(systemName: "folder")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+            Text(path)
+                .font(.system(size: 12))
+                .lineLimit(1)
+                .truncationMode(.head)
+            Spacer(minLength: 8)
+            chooseButton
         }
     }
 
+    /// A link, not a bordered button: the row is one line tall and a bezel
+    /// there reads as a second card inside the first.
     private var chooseButton: some View {
-        Button("Choose…") { showingFolderPicker = true }
-            .controlSize(.small)
+        Button("Change…") { showingFolderPicker = true }
+            .buttonStyle(.plain)
+            .font(.system(size: 12))
+            .foregroundStyle(snapshot?.state == .moving
+                ? AnyShapeStyle(.tertiary) : AnyShapeStyle(Surface.prominent))
             .disabled(snapshot?.state == .moving)
             .help(snapshot?.state == .moving
                 ? "A move is already in progress"
@@ -372,6 +362,11 @@ struct TorrentDetailView: View {
             Section {
                 copyMagnetButton(hash: snapshot.infoHash.hexString, name: snapshot.name)
             }
+            // The Files tab's footer is one line in the design, so this
+            // per-torrent setting lives with the torrent's other settings.
+            Section("Download") {
+                sequentialToggle
+            }
             Section("Speed") {
                 VStack(spacing: 6) {
                     RateChart(samples: store.rateHistory[snapshot.infoHash] ?? [])
@@ -416,6 +411,11 @@ struct TorrentDetailView: View {
                 Section {
                     copyButton(label: "Copy Magnet Link", value: uri)
                 }
+            }
+            // Same home as a live torrent's copy of this setting, so the add
+            // sheet and the inspector stay in step.
+            Section("Download") {
+                sequentialToggle
             }
             Section("Torrent") {
                 infoRow("Name", pending.displayName)
@@ -597,18 +597,27 @@ struct InspectorPane: View {
     @Binding var tab: TorrentDetailTab
 
     var body: some View {
-        if selection.count == 1, let hash = selection.first {
-            TorrentDetailView(subject: .live(hash), tab: $tab)
-                .environment(store)
-        } else {
-            ContentUnavailableView(
-                selection.isEmpty ? "No Selection" : "Multiple Torrents",
-                systemImage: "info.circle",
-                description: Text(selection.isEmpty
-                    ? "Select a torrent to see its files, peers and trackers."
-                    : "Select a single torrent to inspect it.")
-            )
+        Group {
+            if selection.count == 1, let hash = selection.first {
+                TorrentDetailView(subject: .live(hash), tab: $tab)
+                    .environment(store)
+            } else {
+                ContentUnavailableView(
+                    selection.isEmpty ? "No Selection" : "Multiple Torrents",
+                    systemImage: "info.circle",
+                    description: Text(selection.isEmpty
+                        ? "Select a torrent to see its files, peers and trackers."
+                        : "Select a single torrent to inspect it.")
+                )
+            }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // The status bar is applied outside the inspector split, so its inset
+        // never reaches this pane — it has to keep clear of the bar itself.
+        .safeAreaPadding(.bottom, Surface.statusBarHeight)
+        // The inspector is part of the same panel as the window body, not a
+        // separate vibrant sidebar.
+        .background(Surface.panel)
     }
 }
 

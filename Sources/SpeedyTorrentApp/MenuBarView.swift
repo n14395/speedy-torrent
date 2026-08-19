@@ -3,36 +3,6 @@ import SwiftUI
 import UniformTypeIdentifiers
 import TorrentEngine
 
-/// The popup's own background.
-///
-/// The panel paints itself opaquely rather than sitting on the menu's vibrant
-/// material: vibrancy let the desktop tint every fill, which is what made the
-/// shipped popup read warm and washed-out next to the design. A normal window
-/// needs none of this; everything drawn *above* a panel lives in `Surface`.
-private enum Popup {
-    /// The panel's slight lift towards the top of the window.
-    static let background = LinearGradient(
-        colors: [
-            Color(nsColor: appearanceColor(dark: 0x1A242C, light: 0xF7F8FA)),
-            Color(nsColor: appearanceColor(dark: 0x181D21, light: 0xEFF1F4)),
-        ],
-        startPoint: .top,
-        endPoint: .bottom
-    )
-
-    private static func appearanceColor(dark: UInt32, light: UInt32) -> NSColor {
-        NSColor(name: nil) { appearance in
-            let rgb = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
-            return NSColor(
-                srgbRed: Double((rgb >> 16) & 0xFF) / 255,
-                green: Double((rgb >> 8) & 0xFF) / 255,
-                blue: Double(rgb & 0xFF) / 255,
-                alpha: 1
-            )
-        }
-    }
-}
-
 /// The menu bar popup, laid out like a Control Center panel: two aggregate
 /// rate tiles over a card of torrent rows, then a row of controls. Each row's
 /// progress ring doubles as its pause/resume button, so the common actions no
@@ -75,7 +45,7 @@ struct MenuBarView: View {
         }
         .padding(10)
         .frame(width: 320)
-        .background(Popup.background)
+        .background(Surface.panel)
     }
 
     // MARK: - Aggregate rates

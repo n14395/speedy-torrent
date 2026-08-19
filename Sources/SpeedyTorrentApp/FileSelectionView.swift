@@ -160,46 +160,67 @@ struct TorrentFileTree: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if selection != nil {
-                header
-                    .padding(.horizontal, 10)
-                    .padding(.top, 8)
-            }
+        VStack(alignment: .leading, spacing: 0) {
+            header
+                .padding(.horizontal, 12)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
             List {
                 OutlineGroup(displayNodes, children: \.children) { node in
                     row(node, aggregate: aggregates[node.id] ?? .empty)
+                        .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 0, trailing: 12))
+                        .listRowSeparator(.hidden)
                 }
             }
             // Plain, not `.bordered`: the caller wraps this in a card, and the
             // bordered style drew a second box inside it.
             .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .scrollIndicators(.never)
+            .padding(.leading, -Surface.listLeadingBleed)
+            .padding(.trailing, -Surface.listTrailingBleed)
             .frame(maxHeight: .infinity)
         }
         .onAppear { rebuildIfNeeded() }
         .onChange(of: rows.map(\.index)) { rebuildIfNeeded() }
     }
 
+    /// A summary line, not a control strip: what the pane is showing, in the
+    /// same uppercase key the tiles and table header use. Sorting and
+    /// select-all stay reachable as quiet trailing controls rather than the
+    /// segmented picker that used to lead the card.
     private var header: some View {
-        HStack {
-            Picker("Sort", selection: $sortBySize) {
-                Text("Name").tag(false)
-                Text("Size").tag(true)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .controlSize(.small)
-            .frame(width: 110)
-            .help("Order the file tree by name or by size")
-            Spacer()
-            Text("\(wanted.count) of \(rows.count) selected")
-                .font(.caption)
+        HStack(spacing: 8) {
+            Text(summary)
+                .font(.system(size: 10, weight: .medium))
+                .tracking(0.6)
                 .foregroundStyle(.secondary)
-            Button("All") { selection?.wrappedValue = allIndices }
-                .controlSize(.small)
-                .disabled(wanted == allIndices)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            if selection != nil {
+                Button(sortBySize ? "SIZE" : "NAME") { sortBySize.toggle() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .medium))
+                    .tracking(0.6)
+                    .foregroundStyle(.tertiary)
+                    .help("Order the file tree by name or by size")
+                Button("ALL") { selection?.wrappedValue = allIndices }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 10, weight: .medium))
+                    .tracking(0.6)
+                    .foregroundStyle(wanted == allIndices ? AnyShapeStyle(.quaternary) : AnyShapeStyle(Surface.prominent))
+                    .disabled(wanted == allIndices)
+                    .help("Select every file")
+            }
         }
+    }
+
+    /// "4 FILES · 3.5 GB SELECTED".
+    private var summary: String {
+        let selected = wanted
+        let bytes = rows.filter { selected.contains($0.index) }.reduce(Int64(0)) { $0 + $1.length }
+        let count = "\(rows.count) FILE" + (rows.count == 1 ? "" : "S")
+        return "\(count) · \(formatBytes(bytes).uppercased()) SELECTED"
     }
 
     // MARK: - Data
@@ -310,61 +331,67 @@ struct TorrentFileTree: View {
         let checkState: TriStateCheckbox.CheckState = aggregate.selectedCount == aggregate.fileCount
             ? .on
             : (aggregate.selectedCount == 0 ? .off : .mixed)
-        HStack(spacing: 6) {
-            if let selection {
-                TriStateCheckbox(
-                    state: checkState,
-                    // Fully deselecting this node would leave nothing selected.
-                    enabled: !(checkState == .on
-                        && selection.wrappedValue.subtracting(node.descendantIndices).isEmpty),
-                    onToggle: { selectAll in
-                        toggle(node, selectAll: selectAll, selection: selection)
-                    }
-                )
-                .fixedSize()
-            }
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 8) {
+                if let selection {
+                    TriStateCheckbox(
+                        state: checkState,
+                        // Fully deselecting this node would leave nothing selected.
+                        enabled: !(checkState == .on
+                            && selection.wrappedValue.subtracting(node.descendantIndices).isEmpty),
+                        onToggle: { selectAll in
+                            toggle(node, selectAll: selectAll, selection: selection)
+                        }
+                    )
+                    .fixedSize()
+                }
 
-            Image(systemName: node.fileIndex == nil ? "folder" : "doc")
-                .foregroundStyle(.secondary)
-                .font(.caption)
-            Text(node.name)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundStyle(aggregate.skipped ? .secondary : .primary)
-            if node.fileIndex == nil, checkState == .mixed {
-                Text("\(aggregate.selectedCount) of \(aggregate.fileCount)")
-                    .font(.caption2)
+                // Only directories keep a glyph: a leading icon on every leaf
+                // read as noise beside the checkbox that already marks a file.
+                if node.fileIndex == nil {
+                    Image(systemName: "folder")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                }
+                Text(node.name)
+                    .font(.system(size: 13))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(aggregate.skipped ? .secondary : .primary)
+                if node.fileIndex == nil, checkState == .mixed {
+                    Text("\(aggregate.selectedCount) of \(aggregate.fileCount)")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 6)
+                Text(formatBytes(node.length))
+                    .font(.system(size: 13))
                     .foregroundStyle(.secondary)
+                    .monospacedDigit()
             }
-            Spacer(minLength: 6)
-            Text(formatBytes(node.length))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+            // The bar runs the width of the row rather than sharing it: a 44pt
+            // gauge and a percentage stole the space the file names need.
             if showsProgress {
-                progressCell(aggregate)
+                progressBar(aggregate)
             }
         }
+        .padding(.vertical, 5)
+        .help(aggregate.skipped ? "Not being downloaded"
+            : aggregate.progress.formatted(.percent.precision(.fractionLength(0))))
     }
 
-    @ViewBuilder
-    private func progressCell(_ aggregate: Aggregate) -> some View {
-        HStack(spacing: 5) {
-            ProgressView(value: aggregate.progress)
-                .controlSize(.small)
-                .frame(width: 44)
-            if aggregate.skipped {
-                Text("Skipped")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            } else {
-                Text(aggregate.progress.formatted(.percent.precision(.fractionLength(0))))
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
+    private func progressBar(_ aggregate: Aggregate) -> some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Surface.ringTrack)
+                if !aggregate.skipped {
+                    Capsule()
+                        .fill(Surface.prominent)
+                        .frame(width: proxy.size.width * min(1, max(0, aggregate.progress)))
+                }
             }
         }
-        .frame(width: 100, alignment: .trailing)
+        .frame(height: 4)
     }
 
     private func toggle(_ node: TorrentFileNode, selectAll: Bool, selection: Binding<Set<Int>>) {

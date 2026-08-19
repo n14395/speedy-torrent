@@ -24,8 +24,57 @@ enum Surface {
     /// left prominent controls as the odd one out.
     static let prominent = Color.blue
 
-    /// Tiles across a hero row share one height so their fills line up.
+    /// A selected row. Painted by the row itself, over the system highlight,
+    /// which is either a saturated accent (focused) or a flat grey (not) —
+    /// neither of which is the muted blue the design asks for.
+    static let selection = Color(nsColor: appearanceColor(dark: 0x29415D, light: 0xD6E4FB))
+
+    /// Tiles across a hero row share one height so their fills line up. The
+    /// popup's rate tiles carry two lines; the window's carry three, and every
+    /// tile in a row has to clear the tallest of them or its caption spills
+    /// out from under the fill.
     static let tileHeight: CGFloat = 58
+    static let windowTileHeight: CGFloat = 71
+
+    /// The status bar runs the full width of the window, under the inspector
+    /// as well as the list, so both sides have to keep clear of it.
+    static let statusBarHeight: CGFloat = 33
+
+    /// `List` keeps a leading margin and a trailing scroller gutter that
+    /// neither `.listRowInsets` nor `.contentMargins` reaches. Cancelling them
+    /// with negative padding is what puts a row — and the selection band behind
+    /// it — flush with its card. These are the only two numbers to revisit if a
+    /// macOS update changes those metrics.
+    static let listLeadingBleed: CGFloat = 8
+    static let listTrailingBleed: CGFloat = 9.5
+
+    /// The panel every surface sits on: opaque, and slightly lifted towards the
+    /// top of the window. It replaces the system's vibrant material, which let
+    /// the desktop tint each fill and made the whole app read warm.
+    static let panel = LinearGradient(
+        colors: [
+            Color(nsColor: appearanceColor(dark: 0x1A242C, light: 0xF7F8FA)),
+            Color(nsColor: appearanceColor(dark: 0x181D21, light: 0xEFF1F4)),
+        ],
+        startPoint: .top,
+        endPoint: .bottom
+    )
+
+    /// The toolbar and status bar: flatter and a touch more neutral than the
+    /// panel, so the window's chrome reads as chrome.
+    static let chrome = Color(nsColor: appearanceColor(dark: 0x27272C, light: 0xE8E8EC))
+
+    static func appearanceColor(dark: UInt32, light: UInt32) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let rgb = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+            return NSColor(
+                srgbRed: Double((rgb >> 16) & 0xFF) / 255,
+                green: Double((rgb >> 8) & 0xFF) / 255,
+                blue: Double(rgb & 0xFF) / 255,
+                alpha: 1
+            )
+        }
+    }
 }
 
 /// A hairline between rows. `Divider()` is tuned for vibrant material and all
@@ -161,7 +210,9 @@ struct RateTile: View {
         .chartYScale(domain: 0...ceiling)
         .chartLegend(.hidden)
         .chartPlotStyle { $0.padding(0) }
-        .frame(height: 24)
+        // The graph keeps its share of the tile as the tile grows, so the
+        // popup's 58pt tile and the window's 71pt one are one drawing scaled.
+        .frame(height: height * (24 / Surface.tileHeight))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
         .allowsHitTesting(false)
     }

@@ -98,16 +98,17 @@ struct TorrentListView: View {
                 VStack(spacing: 10) {
                     heroTiles
                     torrentCard
+                    // The card is sized to its rows, as in the design; the
+                    // panel shows through beneath a short list.
+                    Spacer(minLength: 0)
                 }
                 .padding(12)
             }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if !store.snapshots.isEmpty {
-                statusBar
-            }
-        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Surface.panel)
         .toolbar { toolbarContent }
+        .toolbarBackground(Surface.chrome, for: .windowToolbar)
         .navigationTitle("SpeedyTorrent")
         // Workaround: toolbar buttons render with a stale dimmed appearance on
         // first launch until an event (e.g. mouse-over) refreshes them.
@@ -125,7 +126,14 @@ struct TorrentListView: View {
         .inspector(isPresented: $showInspector) {
             InspectorPane(selection: selection, tab: $inspectorTab)
                 .environment(store)
-                .inspectorColumnWidth(min: 360, ideal: 460, max: 640)
+                .inspectorColumnWidth(min: 260, ideal: 300, max: 460)
+        }
+        // Below the inspector split, not inside it, so the bar runs the full
+        // width of the window the way the design draws it.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !store.snapshots.isEmpty {
+                statusBar
+            }
         }
         .fileImporter(
             isPresented: $showingFileImporter,
@@ -239,21 +247,24 @@ struct TorrentListView: View {
             RateTile(
                 title: "Download", icon: "arrow.down", tint: .blue,
                 rate: store.totalDownloadRate,
-                samples: store.totalRateHistory, value: \.download
+                samples: store.totalRateHistory, value: \.download,
+                height: Surface.windowTileHeight
             )
             RateTile(
                 title: "Upload", icon: "arrow.up", tint: .green,
                 rate: store.totalUploadRate,
-                samples: store.totalRateHistory, value: \.upload
+                samples: store.totalRateHistory, value: \.upload,
+                height: Surface.windowTileHeight
             )
             StatTile(
                 title: "Active", icon: "list.bullet",
                 value: "\(activeCount)", unit: "of \(store.snapshots.count)",
-                caption: activeCaption
+                caption: activeCaption, height: Surface.windowTileHeight
             )
             StatTile(
                 title: "This session", icon: "clock",
-                value: session.value, unit: session.unit, caption: session.caption
+                value: session.value, unit: session.unit, caption: session.caption,
+                height: Surface.windowTileHeight
             )
         }
     }
@@ -284,16 +295,20 @@ struct TorrentListView: View {
     private enum Col {
         static let number: CGFloat = 30
         static let size: CGFloat = 74
-        static let rate: CGFloat = 78
-        static let eta: CGFloat = 66
-        static let peers: CGFloat = 46
-        static let ratio: CGFloat = 50
+        static let rate: CGFloat = 80
+        static let eta: CGFloat = 70
+        static let ratio: CGFloat = 59
 
-        /// `Table` insets its cells and spaces its columns by amounts it does
-        /// not expose. These two line the custom header up with the rows, and
-        /// are the only numbers to touch if a macOS update shifts them.
+        /// The header and the rows are built from these same two numbers, so
+        /// they line up by construction.
         static let inset: CGFloat = 12
         static let spacing: CGFloat = 8
+
+        /// Row height, and the gap between a row's ring and its name.
+        static let rowHeight: CGFloat = 40
+        static let headerHeight: CGFloat = 25.5
+        static let ring: CGFloat = 24
+        static let ringGap: CGFloat = 10
     }
 
     private var torrentCard: some View {
@@ -309,6 +324,10 @@ struct TorrentListView: View {
                 ContentUnavailableView.search
             }
         }
+        // Hugs its rows rather than filling the window, as the design draws
+        // it; a longer list is still capped by whatever height is available.
+        .frame(maxHeight: Col.headerHeight + 0.5
+            + CGFloat(max(displayedSnapshots.count, 1)) * Col.rowHeight)
     }
 
     /// Our own header, because `TableColumn` takes a title string and offers no
@@ -316,17 +335,16 @@ struct TorrentListView: View {
     /// does that — so owning the header only costs column resizing.
     private var tableHeader: some View {
         HStack(spacing: Col.spacing) {
-            sortHeader("#", \.queuePosition, width: Col.number)
+            sortHeader("#", \.queuePosition, width: Col.number, alignment: .leading)
             sortHeader("Name", \.name, width: nil, alignment: .leading)
             sortHeader("Size", \.totalLength, width: Col.size)
             sortHeader("Down", \.downloadRate, width: Col.rate)
             sortHeader("Up", \.uploadRate, width: Col.rate)
             sortHeader("ETA", \.etaSortKey, width: Col.eta)
-            sortHeader("Peers", \.peerCount, width: Col.peers)
             sortHeader("Ratio", \.ratio, width: Col.ratio)
         }
         .padding(.horizontal, Col.inset)
-        .padding(.vertical, 7)
+        .frame(height: Col.headerHeight)
     }
 
     @ViewBuilder
@@ -370,81 +388,27 @@ struct TorrentListView: View {
         }
     }
 
+    /// A `List`, not a `Table`: `Table` lays its columns out to insets it
+    /// does not expose, so the styled header above could never be lined up
+    /// with the cells for certain. Rows and header now read the same `Col`
+    /// numbers and agree by construction — and the row keeps the selection,
+    /// keyboard navigation and context menus a plain stack would lose.
     private var table: some View {
-        Table(displayedSnapshots, selection: $selection, sortOrder: $sortOrder) {
-            TableColumn("#", value: \.queuePosition) { snapshot in
-                Text("\(snapshot.queuePosition)")
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+        List(selection: $selection) {
+            ForEach(displayedSnapshots) { snapshot in
+                row(snapshot)
+                    .listRowInsets(EdgeInsets())
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+                    .tag(snapshot.infoHash)
             }
-            .width(Col.number)
-
-            // The ring carries the state the Status column used to spell out:
-            // tint for which state, glyph for which action, arc for progress.
-            TableColumn("Name", value: \.name) { snapshot in
-                HStack(spacing: 9) {
-                    ProgressRing(snapshot: snapshot, diameter: 24, compact: true)
-                    Text(snapshot.name)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .foregroundStyle(
-                            snapshot.state == .paused
-                                ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary)
-                        )
-                }
-                .padding(.vertical, 3)
-                .help(statusText(snapshot))
-            }
-            .width(min: 180, ideal: 320)
-
-            TableColumn("Size", value: \.totalLength) { snapshot in
-                Text(snapshot.totalLength > 0 ? formatBytes(snapshot.totalLength) : "—")
-                    .monospacedDigit()
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(Col.size)
-
-            TableColumn("Down", value: \.downloadRate) { snapshot in
-                Text(formatRate(snapshot.downloadRate))
-                    .monospacedDigit()
-                    .foregroundStyle(snapshot.downloadRate >= 1024 ? AnyShapeStyle(Color.blue) : AnyShapeStyle(.secondary))
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(Col.rate)
-
-            TableColumn("Up", value: \.uploadRate) { snapshot in
-                Text(formatRate(snapshot.uploadRate))
-                    .monospacedDigit()
-                    .foregroundStyle(snapshot.uploadRate >= 1024 ? AnyShapeStyle(Color.green) : AnyShapeStyle(.secondary))
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(Col.rate)
-
-            TableColumn("ETA", value: \.etaSortKey) { snapshot in
-                Text(formatETA(snapshot.eta))
-                    .monospacedDigit()
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(Col.eta)
-
-            TableColumn("Peers", value: \.peerCount) { snapshot in
-                Text("\(snapshot.peerCount)")
-                    .monospacedDigit()
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(Col.peers)
-
-            TableColumn("Ratio", value: \.ratio) { snapshot in
-                Text(String(format: "%.2f", snapshot.ratio))
-                    .monospacedDigit()
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(Col.ratio)
         }
-        .tableColumnHeaders(.hidden)
-        .tableStyle(.inset(alternatesRowBackgrounds: false))
+        .listStyle(.plain)
         .scrollContentBackground(.hidden)
+        .scrollIndicators(.never)
+        .padding(.leading, -Surface.listLeadingBleed)
+        .padding(.trailing, -Surface.listTrailingBleed)
+        .environment(\.defaultMinListRowHeight, Col.rowHeight)
         .contextMenu(forSelectionType: InfoHash.self) { hashes in
             contextMenu(for: hashes)
         } primaryAction: { hashes in
@@ -452,6 +416,59 @@ struct TorrentListView: View {
                 store.revealInFinder(hash)
             }
         }
+    }
+
+    private func row(_ snapshot: TorrentSnapshot) -> some View {
+        let isSelected = selection.contains(snapshot.infoHash)
+        return HStack(spacing: Col.spacing) {
+            Text("\(snapshot.queuePosition)")
+                .foregroundStyle(.secondary)
+                .frame(width: Col.number, alignment: .leading)
+
+            // The ring carries the state the Status column used to spell out:
+            // tint for which state, glyph for which action, arc for progress.
+            HStack(spacing: Col.ringGap) {
+                ProgressRing(snapshot: snapshot, diameter: Col.ring, compact: true)
+                Text(snapshot.name)
+                    .lineLimit(1)
+                    .foregroundStyle(
+                        snapshot.state == .paused
+                            ? AnyShapeStyle(.secondary) : AnyShapeStyle(.primary)
+                    )
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .help(statusText(snapshot))
+
+            Text(snapshot.totalLength > 0 ? formatBytes(snapshot.totalLength) : "—")
+                .foregroundStyle(.secondary)
+                .frame(width: Col.size, alignment: .trailing)
+
+            Text(formatRate(snapshot.downloadRate))
+                .foregroundStyle(snapshot.downloadRate >= 1024
+                    ? AnyShapeStyle(Color.blue) : AnyShapeStyle(.secondary))
+                .frame(width: Col.rate, alignment: .trailing)
+
+            Text(formatRate(snapshot.uploadRate))
+                .foregroundStyle(snapshot.uploadRate >= 1024
+                    ? AnyShapeStyle(Color.green) : AnyShapeStyle(.secondary))
+                .frame(width: Col.rate, alignment: .trailing)
+
+            Text(formatETA(snapshot.eta))
+                .foregroundStyle(.secondary)
+                .frame(width: Col.eta, alignment: .trailing)
+
+            // Green once a torrent has given back at least what it took.
+            Text(String(format: "%.2f", snapshot.ratio))
+                .foregroundStyle(snapshot.ratio >= 1 ? AnyShapeStyle(Color.green) : AnyShapeStyle(.secondary))
+                .frame(width: Col.ratio, alignment: .trailing)
+        }
+        .font(.system(size: 13))
+        .monospacedDigit()
+        .padding(.horizontal, Col.inset)
+        .frame(height: Col.rowHeight)
+        // Opaque, and drawn by the row rather than behind it, so it covers the
+        // system highlight instead of tinting it.
+        .background(isSelected ? AnyShapeStyle(Surface.selection) : AnyShapeStyle(.clear))
     }
 
     // MARK: - Status bar
@@ -472,7 +489,7 @@ struct TorrentListView: View {
             Group {
                 // Total rates live in the hero tiles now; what is left here is
                 // the network's health, which has nowhere better to sit.
-                Label("\(store.dhtNodeCount)", systemImage: "point.3.connected.trianglepath.dotted")
+                Label("\(store.dhtNodeCount) nodes", systemImage: "point.3.connected.trianglepath.dotted")
                     .help("DHT nodes in the routing table")
 
                 Label(portMappingSummary, systemImage: "network")
@@ -498,10 +515,10 @@ struct TorrentListView: View {
             .foregroundStyle(.secondary)
             .monospacedDigit()
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(.bar)
-        .overlay(alignment: .top) { Divider() }
+        .padding(.horizontal, 12)
+        .frame(height: Surface.statusBarHeight)
+        .background(Surface.chrome)
+        .overlay(alignment: .top) { SurfaceSeparator() }
     }
 
     /// The status filter as pills with live counts. As a menu it was a setting
@@ -524,7 +541,7 @@ struct TorrentListView: View {
                     }
                     .foregroundStyle(isOn ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
                     .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
+                    .padding(.vertical, 4)
                     .background {
                         Capsule().fill(isOn ? AnyShapeStyle(Surface.prominent) : AnyShapeStyle(Surface.fill))
                     }
@@ -540,7 +557,7 @@ struct TorrentListView: View {
         switch store.portMappingStatus {
         case .disabled: "Off"
         case .mapping: "Mapping…"
-        case .mapped(let port, _): "Port \(port)"
+        case .mapped(let port, _): "Port \(port) mapped"
         case .failed: "No mapping"
         }
     }
@@ -605,6 +622,15 @@ struct TorrentListView: View {
             } label: {
                 Label("Add", systemImage: "plus")
             }
+            // The design leads the toolbar with a filled, labelled Add: it is
+            // the one action a new window is for, and an unlabelled "+" beside
+            // five other glyphs did not read that way. macOS 26 draws its own
+            // bezel for a toolbar menu, so this gets the label and the tint but
+            // not the design's solid fill.
+            .menuStyle(.button)
+            .buttonStyle(.borderedProminent)
+            .labelStyle(.titleAndIcon)
+            .tint(Surface.prominent)
             .help("Add a torrent file or magnet link")
             .id(toolbarRefresh)
         }
@@ -615,15 +641,6 @@ struct TorrentListView: View {
 
         ToolbarItemGroup(placement: .primaryAction) {
             Button {
-                selectedSnapshots.forEach { store.resume($0.infoHash) }
-            } label: {
-                Label("Resume", systemImage: "play.fill")
-            }
-            .help("Resume the selected torrents")
-            .id(toolbarRefresh)
-            .disabled(!selectedSnapshots.contains { $0.state == .paused })
-
-            Button {
                 selectedSnapshots.forEach { store.pause($0.infoHash) }
             } label: {
                 Label("Pause", systemImage: "pause.fill")
@@ -631,6 +648,15 @@ struct TorrentListView: View {
             .help("Pause the selected torrents")
             .id(toolbarRefresh)
             .disabled(!selectedSnapshots.contains { $0.state == .downloading || $0.state == .seeding || $0.state == .queued })
+
+            Button {
+                selectedSnapshots.forEach { store.resume($0.infoHash) }
+            } label: {
+                Label("Resume", systemImage: "play.fill")
+            }
+            .help("Resume the selected torrents")
+            .id(toolbarRefresh)
+            .disabled(!selectedSnapshots.contains { $0.state == .paused })
 
             Button {
                 store.snapshots.filter { selection.contains($0.infoHash) }
