@@ -656,7 +656,7 @@ struct TorrentListView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background {
-                        Capsule().fill(isOn ? AnyShapeStyle(Surface.prominent) : AnyShapeStyle(Surface.fill))
+                        Capsule().fill(isOn ? AnyShapeStyle(Surface.prominent) : AnyShapeStyle(Surface.controlFill))
                     }
                     .contentShape(.capsule)
                 }
@@ -742,7 +742,7 @@ struct TorrentListView: View {
                 .frame(height: 24)
                 // The same fill the action buttons carry while they are
                 // clickable, so the whole row reads as one set of controls.
-                .background(Surface.fill, in: .rect(cornerRadius: Surface.corner - 2))
+                .background(Surface.controlFill, in: .rect(cornerRadius: Surface.corner - 2))
                 .help("Add a torrent file or magnet link")
 
                 toolbarButton("pause.fill", "Pause the selected torrents",
@@ -781,7 +781,7 @@ struct TorrentListView: View {
                 .frame(width: 26, height: 24)
                 .background {
                     if enabled {
-                        RoundedRectangle(cornerRadius: Surface.corner - 2).fill(Surface.fill)
+                        RoundedRectangle(cornerRadius: Surface.corner - 2).fill(Surface.controlFill)
                     }
                 }
                 .contentShape(.rect)
@@ -813,7 +813,7 @@ struct TorrentListView: View {
         }
         .padding(.horizontal, 8)
         .frame(width: 178, height: 24)
-        .background(Surface.fill, in: .rect(cornerRadius: Surface.corner))
+        .background(Surface.controlFill, in: .rect(cornerRadius: Surface.corner))
     }
 
     private var selectedSnapshots: [TorrentSnapshot] {

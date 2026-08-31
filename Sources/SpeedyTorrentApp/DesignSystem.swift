@@ -10,11 +10,25 @@ import TorrentEngine
 /// which is what made an earlier build read warm and washed-out. Treat them as
 /// design constants — a cleanup pass should not "simplify" them back.
 ///
-/// Every surface above a panel — tiles, cards, pills, round buttons — is the
-/// same single step of `primary`, and hover adds that step again.
+/// Every card above a panel — tiles, sections, the torrent list — carries
+/// `fill`; controls that sit on the window's *chrome* instead carry
+/// `controlFill`, and `hover` lifts either by one more step.
 enum Surface {
     static let corner: CGFloat = 8
-    static let fill = Color.primary.opacity(0.10)
+
+    /// A card on the panel: a tile, a section, the torrent list. Opaque and
+    /// explicit rather than a step of `primary`, because the panel underneath
+    /// is dark enough now that a translucent white step washed out to grey
+    /// instead of the design's slate.
+    static let fillColor = appearanceColor(dark: 0x1B2026, light: 0xE2E3E5)
+    static let fill = Color(nsColor: fillColor)
+
+    /// A control that sits on the *chrome* rather than the panel — the toolbar
+    /// buttons, the search field, the status bar's filter pills. A card's
+    /// colour is now the chrome's own colour, so these have to lift off it
+    /// instead of matching it.
+    static let controlFill = Color.primary.opacity(0.10)
+
     static let hover = Color.primary.opacity(0.11)
     static let separator = Color.primary.opacity(0.15)
     static let ringTrack = Color.primary.opacity(0.21)
@@ -53,11 +67,13 @@ enum Surface {
     static let listLeadingBleed: CGFloat = 8
     static let listTrailingBleed: CGFloat = 9.5
 
-    /// The panel every surface sits on: opaque, and slightly lifted towards the
-    /// top of the window. It replaces the system's vibrant material, which let
-    /// the desktop tint each fill and made the whole app read warm.
-    static let panelTopColor = appearanceColor(dark: 0x1A242C, light: 0xF7F8FA)
-    static let panelBottomColor = appearanceColor(dark: 0x181D21, light: 0xEFF1F4)
+    /// The panel every surface sits on: opaque, replacing the system's vibrant
+    /// material, which let the desktop tint each fill and made the whole app
+    /// read warm. Flat in dark mode — at the design's near-black a vertical
+    /// ramp reads as banding rather than lift — and still lifted towards the
+    /// top of the window in light mode.
+    static let panelTopColor = appearanceColor(dark: 0x081316, light: 0xF7F8FA)
+    static let panelBottomColor = appearanceColor(dark: 0x081316, light: 0xEFF1F4)
 
     static let panel = LinearGradient(
         colors: [Color(nsColor: panelTopColor), Color(nsColor: panelBottomColor)],
@@ -65,9 +81,10 @@ enum Surface {
         endPoint: .bottom
     )
 
-    /// The toolbar and status bar: flatter and a touch more neutral than the
-    /// panel, so the window's chrome reads as chrome.
-    static let chromeColor = appearanceColor(dark: 0x27272C, light: 0xE8E8EC)
+    /// The toolbar and status bar. In dark mode they carry a card's value, so
+    /// the chrome reads as a frame of the same material the cards are cut from
+    /// and the panel recedes behind both.
+    static let chromeColor = appearanceColor(dark: 0x1B2026, light: 0xE8E8EC)
     static let chrome = Color(nsColor: chromeColor)
 
     static func appearanceColor(dark: UInt32, light: UInt32) -> NSColor {
