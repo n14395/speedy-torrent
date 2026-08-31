@@ -23,6 +23,12 @@ actor PeerConnection {
     /// Session-wide token buckets; receive re-arming and sends block on them.
     private var downloadLimiter: RateLimiter?
     private var uploadLimiter: RateLimiter?
+    /// This torrent's own buckets, when it carries a limit of its own. Taken
+    /// *before* the session's: the shared budget is the contended one, so it is
+    /// held for as short a time as possible — acquiring it first would leave
+    /// bandwidth idle while a capped torrent waits on its own bucket.
+    private var torrentDownloadLimiter: RateLimiter?
+    private var torrentUploadLimiter: RateLimiter?
 
     /// MSE/PE stream ciphers, installed once the encrypted handshake completes.
     /// While nil, the wire is plaintext (and the MSE handshake reads/writes raw
@@ -32,9 +38,16 @@ actor PeerConnection {
     /// True once an MSE handshake negotiated RC4 for this connection.
     private(set) var isEncrypted = false
 
-    func setLimiters(download: RateLimiter?, upload: RateLimiter?) {
+    func setLimiters(
+        download: RateLimiter?,
+        upload: RateLimiter?,
+        torrentDownload: RateLimiter? = nil,
+        torrentUpload: RateLimiter? = nil
+    ) {
         downloadLimiter = download
         uploadLimiter = upload
+        torrentDownloadLimiter = torrentDownload
+        torrentUploadLimiter = torrentUpload
     }
 
     init(address: PeerAddress) {
@@ -124,10 +137,14 @@ actor PeerConnection {
             closeError = PeerWireError.network(error.localizedDescription)
         } else if isComplete {
             closed = true
-        } else if let limiter = downloadLimiter, let count = data?.count, count > 0 {
+        } else if let count = data?.count, count > 0,
+                  downloadLimiter != nil || torrentDownloadLimiter != nil {
             // Throttle by delaying the next read; TCP backpressure does the rest.
+            let torrent = torrentDownloadLimiter
+            let session = downloadLimiter
             Task {
-                await limiter.acquire(count)
+                await torrent?.acquire(count)
+                await session?.acquire(count)
                 self.pump()
             }
         } else {
@@ -189,9 +206,8 @@ actor PeerConnection {
 
     private func sendRaw(_ data: Data) async throws {
         guard !closed else { throw closeError ?? PeerWireError.connectionClosed }
-        if let uploadLimiter {
-            await uploadLimiter.acquire(data.count)
-        }
+        await torrentUploadLimiter?.acquire(data.count)
+        await uploadLimiter?.acquire(data.count)
         bytesSent += Int64(data.count)
         let payload = rc4Send != nil ? rc4Send!.process(data) : data
         return try await withCheckedThrowingContinuation { continuation in

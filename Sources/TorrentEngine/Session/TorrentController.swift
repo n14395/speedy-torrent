@@ -14,6 +14,17 @@ public enum TorrentState: String, Sendable {
     case failed
 }
 
+/// How urgently a file's pieces are requested, relative to the torrent's other
+/// files. Orthogonal to selection: priority orders what is fetched next,
+/// `wanted` decides whether it is fetched at all.
+public enum FilePriority: Int, Sendable, Codable, CaseIterable, Comparable {
+    case low = -1
+    case normal = 0
+    case high = 1
+
+    public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+}
+
 /// One file inside a torrent, with its selection state and progress.
 public struct TorrentFileStatus: Sendable, Identifiable, Equatable {
     public var id: Int { index }
@@ -21,6 +32,7 @@ public struct TorrentFileStatus: Sendable, Identifiable, Equatable {
     public let path: [String]
     public let length: Int64
     public let wanted: Bool
+    public let priority: FilePriority
     public let completedLength: Int64
 
     public var progress: Double {
@@ -80,6 +92,10 @@ public struct TorrentSnapshot: Sendable, Identifiable {
     /// Per-torrent settings, for the settings UI.
     public let downloadDirectory: String
     public let sequential: Bool
+    /// Per-torrent speed caps in bytes/second; nil = only the session's limit
+    /// applies.
+    public let downloadRateLimit: Int?
+    public let uploadRateLimit: Int?
     /// When the torrent was first added (Unix time; 0 when unknown).
     public let addedAt: Double
     /// Piece size in bytes (0 while metadata is unknown).
@@ -181,6 +197,12 @@ actor TorrentController {
     private let addedAt: Double
     private let downloadLimiter: RateLimiter?
     private let uploadLimiter: RateLimiter?
+    /// This torrent's own buckets, created only while it carries an override so
+    /// unlimited torrents don't pay for an extra actor hop per block.
+    private var torrentDownloadLimiter: RateLimiter?
+    private var torrentUploadLimiter: RateLimiter?
+    private(set) var downloadRateLimit: Int?
+    private(set) var uploadRateLimit: Int?
     private let webSeeds: [String]
     private let webSeedClient: WebSeedClient
     private var webSeedTask: Task<Void, Never>?
@@ -220,6 +242,7 @@ actor TorrentController {
         persistence: PersistenceStore? = nil,
         initialResume: ResumeData? = nil,
         wantedFiles: Set<Int>? = nil,
+        filePriorities: [Int: FilePriority]? = nil,
         downloadLimiter: RateLimiter? = nil,
         uploadLimiter: RateLimiter? = nil,
         webSeeds: [String] = []
@@ -234,7 +257,8 @@ actor TorrentController {
         self.pieces = PieceManager(
             info: info,
             sequential: initialResume?.sequential ?? config.sequential,
-            wantedFiles: wantedFiles ?? resumeWanted
+            wantedFiles: wantedFiles ?? resumeWanted,
+            filePriorities: filePriorities ?? initialResume?.savedFilePriorities ?? [:]
         )
         self.trackers = TrackerManager(tiers: announceTiers)
         self.sessionPeerID = sessionPeerID
@@ -245,6 +269,15 @@ actor TorrentController {
         self.addedAt = initialResume?.addedAt ?? Date().timeIntervalSince1970
         self.downloadLimiter = downloadLimiter
         self.uploadLimiter = uploadLimiter
+        self.downloadRateLimit = initialResume?.downloadRateLimit
+        self.uploadRateLimit = initialResume?.uploadRateLimit
+        self.torrentDownloadLimiter = Self.makeLimiter(self.downloadRateLimit)
+        self.torrentUploadLimiter = Self.makeLimiter(self.uploadRateLimit)
+    }
+
+    private static func makeLimiter(_ bytesPerSecond: Int?) -> RateLimiter? {
+        guard let bytesPerSecond, bytesPerSecond > 0 else { return nil }
+        return RateLimiter(bytesPerSecond: bytesPerSecond)
     }
 
     // MARK: - Lifecycle
@@ -393,6 +426,10 @@ actor TorrentController {
                 let unwanted = Set(info.files.indices).subtracting(pieces.wantedFiles)
                 return unwanted.isEmpty ? nil : unwanted.sorted()
             }(),
+            highPriorityFiles: pieces.fileIndices(at: .high),
+            lowPriorityFiles: pieces.fileIndices(at: .low),
+            downloadRateLimit: downloadRateLimit,
+            uploadRateLimit: uploadRateLimit,
             addedAt: addedAt,
             fileStamps: await store.fileStamps()
         )
@@ -540,6 +577,7 @@ actor TorrentController {
                 path: file.path,
                 length: file.length,
                 wanted: pieces.wantedFiles.contains(index),
+                priority: pieces.priority(for: index),
                 completedLength: done
             )
         }
@@ -615,6 +653,52 @@ actor TorrentController {
         await saveResume()
     }
 
+    private func applyLimiters(to connection: PeerConnection) async {
+        await connection.setLimiters(
+            download: downloadLimiter,
+            upload: uploadLimiter,
+            torrentDownload: torrentDownloadLimiter,
+            torrentUpload: torrentUploadLimiter
+        )
+    }
+
+    /// Sets this torrent's own speed caps in bytes/second (nil or 0 = follow
+    /// only the session's). Takes effect on connections that are already open:
+    /// a limit you have to reconnect for isn't a limit anyone would trust.
+    func setRateLimits(download: Int?, upload: Int?) async {
+        let newDownload = (download ?? 0) > 0 ? download : nil
+        let newUpload = (upload ?? 0) > 0 ? upload : nil
+        guard newDownload != downloadRateLimit || newUpload != uploadRateLimit else { return }
+        downloadRateLimit = newDownload
+        uploadRateLimit = newUpload
+
+        // Re-rate the buckets in place where they already exist, so tokens
+        // banked a moment ago aren't discarded by a small edit.
+        if let newDownload, let limiter = torrentDownloadLimiter {
+            await limiter.setRate(newDownload)
+        } else {
+            torrentDownloadLimiter = Self.makeLimiter(newDownload)
+        }
+        if let newUpload, let limiter = torrentUploadLimiter {
+            await limiter.setRate(newUpload)
+        } else {
+            torrentUploadLimiter = Self.makeLimiter(newUpload)
+        }
+
+        for peer in peers.values {
+            await applyLimiters(to: peer.connection)
+        }
+        await saveResume()
+    }
+
+    /// Changes how urgently the given files are requested. Nothing about the
+    /// transfer stops or restarts — the next piece picked simply comes from the
+    /// most urgent file that still has work left.
+    func setFilePriority(_ priority: FilePriority, for files: Set<Int>) async {
+        pieces.setPriority(priority, for: files)
+        await saveResume()
+    }
+
     var contentURL: URL { store.revealURL() }
 
     func addKnownPeers(_ addresses: [PeerAddress]) {
@@ -644,6 +728,8 @@ actor TorrentController {
             errorMessage: errorMessage,
             downloadDirectory: downloadDirectory.path,
             sequential: pieces.sequential,
+            downloadRateLimit: downloadRateLimit,
+            uploadRateLimit: uploadRateLimit,
             addedAt: addedAt,
             pieceLength: info.pieceLength
         )
@@ -720,7 +806,11 @@ actor TorrentController {
             }
             let base = webSeeds[urlIndex % webSeeds.count]
             do {
-                let data = try await webSeedClient.fetchPiece(piece, from: base)
+                let data = try await webSeedClient.fetchPiece(
+                    piece, from: base,
+                    torrentLimiter: torrentDownloadLimiter,
+                    sessionLimiter: downloadLimiter
+                )
                 await ingestWebSeedPiece(piece, data: data)
             } catch {
                 urlIndex += 1 // rotate to another mirror
@@ -785,7 +875,7 @@ actor TorrentController {
     private func attemptOutgoing(_ address: PeerAddress, encrypt: Bool, require: Bool) async -> Bool {
         let connection = PeerConnection(address: address)
         do {
-            await connection.setLimiters(download: downloadLimiter, upload: uploadLimiter)
+            await applyLimiters(to: connection)
             try await connection.start()
             if encrypt {
                 _ = try await connection.mseInitiatorHandshake(
@@ -816,7 +906,7 @@ actor TorrentController {
             connection.close()
             return
         }
-        await connection.setLimiters(download: downloadLimiter, upload: uploadLimiter)
+        await applyLimiters(to: connection)
         let address = connection.address
         connectedAddresses.insert(address)
         let taskID = UUID()

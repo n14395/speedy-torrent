@@ -12,6 +12,8 @@ struct FileRow: Identifiable, Equatable {
     let completedLength: Int64?
     /// The engine's current selection, used when the tree is read-only.
     var wanted = true
+    /// How urgently this file is requested relative to the rest.
+    var priority: FilePriority = .normal
 }
 
 extension Array where Element == TorrentFileStatus {
@@ -20,7 +22,8 @@ extension Array where Element == TorrentFileStatus {
         map {
             FileRow(
                 index: $0.index, path: $0.path, length: $0.length,
-                completedLength: $0.completedLength, wanted: $0.wanted
+                completedLength: $0.completedLength, wanted: $0.wanted,
+                priority: $0.priority
             )
         }
     }
@@ -148,6 +151,8 @@ struct TorrentFileTree: View {
     let rows: [FileRow]
     /// nil renders a read-only tree.
     var selection: Binding<Set<Int>>?
+    /// Applies a priority to a whole subtree; nil hides the priority control.
+    var onSetPriority: ((FilePriority, Set<Int>) -> Void)?
 
     /// Remembered across sheets and launches.
     @AppStorage("fileTreeSortBySize") private var sortBySize = false
@@ -292,8 +297,26 @@ struct TorrentFileTree: View {
         var wantedDone: Int64 = 0
         var totalLength: Int64 = 0
         var totalDone: Int64 = 0
+        /// The priority shared by every file under this node, or nil when they
+        /// disagree — a folder of mixed files shows no single value.
+        var priority: FilePriority?
+        var priorityMixed = false
 
         static let empty = Aggregate()
+
+        var displayPriority: FilePriority? { priorityMixed ? nil : priority }
+
+        /// Folds a child's priority into this node's.
+        mutating func absorbPriority(of child: Aggregate) {
+            guard child.fileCount > 0 else { return }
+            if child.priorityMixed {
+                priorityMixed = true
+            } else if priority == nil {
+                priority = child.priority
+            } else if priority != child.priority {
+                priorityMixed = true
+            }
+        }
 
         /// Progress over wanted bytes when anything is wanted; otherwise raw
         /// completion, so a partly downloaded skipped file still shows a bar.
@@ -320,6 +343,7 @@ struct TorrentFileTree: View {
                 aggregate.fileCount = 1
                 aggregate.totalLength = row.length
                 aggregate.totalDone = done
+                aggregate.priority = row.priority
                 if selected.contains(fileIndex) {
                     aggregate.selectedCount = 1
                     aggregate.wantedLength = row.length
@@ -334,6 +358,7 @@ struct TorrentFileTree: View {
                     aggregate.wantedDone += sub.wantedDone
                     aggregate.totalLength += sub.totalLength
                     aggregate.totalDone += sub.totalDone
+                    aggregate.absorbPriority(of: sub)
                 }
             }
             result[node.id] = aggregate
@@ -412,6 +437,9 @@ struct TorrentFileTree: View {
                     .font(.system(size: 13))
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                if onSetPriority != nil {
+                    priorityMenu(node, current: aggregate.displayPriority)
+                }
             }
             // The bar runs the width of the row rather than sharing it: a 44pt
             // gauge and a percentage stole the space the file names need.
@@ -423,6 +451,63 @@ struct TorrentFileTree: View {
         .padding(.leading, CGFloat(depth) * 15)
         .help(aggregate.skipped ? "Not being downloaded"
             : aggregate.progress.formatted(.percent.precision(.fractionLength(0))))
+    }
+
+    /// Priority for one file or a whole folder. Normal rows stay a faint dash
+    /// so the control is discoverable without shouting on every line; only a
+    /// row that has actually been moved up or down takes colour.
+    private func priorityMenu(_ node: TorrentFileNode, current: FilePriority?) -> some View {
+        Menu {
+            Picker("Priority", selection: Binding(
+                get: { current },
+                set: { newValue in
+                    guard let newValue else { return }
+                    onSetPriority?(newValue, node.descendantIndices)
+                }
+            )) {
+                Text("High").tag(FilePriority?.some(.high))
+                Text("Normal").tag(FilePriority?.some(.normal))
+                Text("Low").tag(FilePriority?.some(.low))
+            }
+            .pickerStyle(.inline)
+        } label: {
+            Image(systemName: Self.priorityIcon(current))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Self.priorityTint(current))
+                .frame(width: 16, height: 16)
+                .contentShape(.rect)
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(Self.priorityHelp(current))
+    }
+
+    private static func priorityIcon(_ priority: FilePriority?) -> String {
+        switch priority {
+        case .high: "chevron.up"
+        case .low: "chevron.down"
+        case .normal: "minus"
+        case nil: "chevron.up.chevron.down" // folder of mixed files
+        }
+    }
+
+    private static func priorityTint(_ priority: FilePriority?) -> AnyShapeStyle {
+        switch priority {
+        case .high: AnyShapeStyle(Surface.prominent)
+        case .low: AnyShapeStyle(.secondary)
+        default: AnyShapeStyle(.tertiary)
+        }
+    }
+
+    private static func priorityHelp(_ priority: FilePriority?) -> String {
+        switch priority {
+        case .high: "High priority — requested before the rest"
+        case .low: "Low priority — requested after the rest"
+        case .normal: "Normal priority"
+        case nil: "Mixed priorities — choose one to apply to everything here"
+        }
     }
 
     private func progressBar(_ aggregate: Aggregate) -> some View {

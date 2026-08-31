@@ -182,7 +182,8 @@ public actor TorrentSession {
         fileData: Data,
         downloadDirectory: URL? = nil,
         sequential: Bool? = nil,
-        wantedFiles: Set<Int>? = nil
+        wantedFiles: Set<Int>? = nil,
+        filePriorities: [Int: FilePriority]? = nil
     ) async throws -> InfoHash {
         let meta = try TorrentMetaInfo(torrentFileData: fileData)
         return try await addTorrent(
@@ -191,6 +192,7 @@ public actor TorrentSession {
             downloadDirectory: downloadDirectory,
             sequential: sequential,
             wantedFiles: wantedFiles,
+            filePriorities: filePriorities,
             resume: nil,
             persistTorrentData: fileData,
             webSeeds: meta.webSeeds
@@ -203,6 +205,7 @@ public actor TorrentSession {
         downloadDirectory: URL?,
         sequential: Bool? = nil,
         wantedFiles: Set<Int>? = nil,
+        filePriorities: [Int: FilePriority]? = nil,
         resume: ResumeData? = nil,
         persistTorrentData: Data? = nil,
         webSeeds: [String] = []
@@ -225,6 +228,7 @@ public actor TorrentSession {
             persistence: persistence,
             initialResume: resume,
             wantedFiles: wantedFiles,
+            filePriorities: filePriorities,
             downloadLimiter: downloadLimiter,
             uploadLimiter: uploadLimiter,
             webSeeds: webSeeds
@@ -476,14 +480,15 @@ public actor TorrentSession {
     /// Turns a metadata prefetch into a real download. If metadata already
     /// arrived the torrent is built immediately with the chosen selection;
     /// otherwise the in-flight fetch is promoted to a committed magnet that
-    /// converts itself on resolve (ignoring `wantedFiles`, since files are
-    /// unknown until then).
+    /// converts itself on resolve (ignoring `wantedFiles` and `filePriorities`,
+    /// since files are unknown until then).
     @discardableResult
     public func commitMagnet(
         _ infoHash: InfoHash,
         downloadDirectory: URL? = nil,
         sequential: Bool? = nil,
-        wantedFiles: Set<Int>? = nil
+        wantedFiles: Set<Int>? = nil,
+        filePriorities: [Int: FilePriority]? = nil
     ) async throws -> InfoHash {
         guard let controller = prefetches.removeValue(forKey: infoHash) else {
             throw SessionError.unknownTorrent
@@ -516,6 +521,7 @@ public actor TorrentSession {
                 downloadDirectory: directory,
                 sequential: wantSequential,
                 wantedFiles: wanted,
+                filePriorities: filePriorities,
                 resume: nil,
                 persistTorrentData: assembled
             )
@@ -586,6 +592,24 @@ public actor TorrentSession {
     }
 
     /// Restricts the download to the given file indices (must be non-empty).
+    /// Caps one torrent's transfer rates in bytes/second (nil or 0 clears the
+    /// cap). The session-wide limits still apply on top: a torrent can be held
+    /// below the global budget, never granted more than it.
+    public func setRateLimits(download: Int?, upload: Int?, for infoHash: InfoHash) async throws {
+        guard let controller = controllers[infoHash] else { throw SessionError.unknownTorrent }
+        await controller.setRateLimits(download: download, upload: upload)
+    }
+
+    /// Changes how urgently the given files are requested within one torrent.
+    /// Priority orders the request queue; it does not reserve bandwidth, and it
+    /// has no effect on files that aren't wanted.
+    public func setFilePriority(
+        _ priority: FilePriority, forFiles files: Set<Int>, in infoHash: InfoHash
+    ) async throws {
+        guard let controller = controllers[infoHash] else { throw SessionError.unknownTorrent }
+        await controller.setFilePriority(priority, for: files)
+    }
+
     public func setWantedFiles(_ wanted: Set<Int>, for infoHash: InfoHash) async throws {
         guard let controller = controllers[infoHash] else {
             throw SessionError.unknownTorrent

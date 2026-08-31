@@ -122,4 +122,62 @@ final class TinyRangeServer: @unchecked Sendable {
 
         await session.shutdown()
     }
+
+    /// Which bucket the cap is set on. HTTP mirror traffic crosses the same
+    /// link as peer traffic, so both must hold it back.
+    enum LimitScope: Sendable {
+        case session
+        case torrent
+    }
+
+    @Test(.timeLimit(.minutes(1)), arguments: [LimitScope.session, LimitScope.torrent])
+    func webSeedTrafficRespectsRateLimits(_ scope: LimitScope) async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("webseed-limit-\(UUID().uuidString)")
+        let src = root.appendingPathComponent("src")
+        let content = src.appendingPathComponent("payload")
+        let leechDir = root.appendingPathComponent("leech")
+        try FileManager.default.createDirectory(at: content, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: leechDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var gen = SystemRandomNumberGenerator()
+        let payload = Data((0..<300_000).map { _ in UInt8.random(in: 0...255, using: &gen) })
+        try payload.write(to: content.appendingPathComponent("file.bin"))
+        let torrentData = try TorrentBuilder.makeTorrentData(contentsOf: content, pieceLength: 32 * 1024)
+        let meta = try TorrentMetaInfo(torrentFileData: torrentData)
+
+        let server = try TinyRangeServer(payload: payload)
+        await server.start()
+        defer { server.stop() }
+        let base = "http://127.0.0.1:\(server.boundPort)"
+
+        // 300 KB at 100 KiB/s → ~3s, and ≥ ~2s even after the 1s burst.
+        let limit = 100 * 1024
+        let session = TorrentSession(configuration: .init(
+            downloadDirectory: leechDir, listenPort: 0,
+            downloadRateLimit: scope == .session ? limit : nil,
+            enableDHT: false
+        ))
+        let start = ContinuousClock.now
+        let hash = try await session.addTorrent(
+            info: meta.info, announceTiers: [], downloadDirectory: leechDir, webSeeds: [base]
+        )
+        if scope == .torrent {
+            try await session.setRateLimits(download: limit, upload: nil, for: hash)
+        }
+
+        var completed = false
+        for _ in 0..<600 {
+            try await Task.sleep(for: .milliseconds(100))
+            if await session.snapshots().first?.state == .seeding { completed = true; break }
+        }
+        let elapsed = start.duration(to: .now)
+
+        #expect(completed)
+        #expect(elapsed >= .seconds(1.5), "\(scope) limit did not hold web seeds back: \(elapsed)")
+        let got = try Data(contentsOf: leechDir.appendingPathComponent("payload/file.bin"))
+        #expect(got == payload)
+        await session.shutdown()
+    }
 }

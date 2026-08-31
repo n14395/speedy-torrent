@@ -13,10 +13,25 @@ struct ResumeData: Codable, Sendable {
     var sequential: Bool?
     /// File indices excluded from download (absent/nil = everything wanted).
     var unwantedFiles: [Int]?
+    /// Files pulled ahead of / pushed behind the rest (absent = all normal).
+    var highPriorityFiles: [Int]?
+    var lowPriorityFiles: [Int]?
+    /// Per-torrent speed caps in bytes/second (absent = session limits only).
+    var downloadRateLimit: Int?
+    var uploadRateLimit: Int?
     var addedAt: Double
     /// Relative path → modification time at last save; a mismatch on load
     /// forces a full hash re-check instead of trusting the bitfield.
     var fileStamps: [String: Double]
+
+    /// The stored priorities as the sparse map the piece manager keeps. Empty
+    /// for records written before priorities existed.
+    var savedFilePriorities: [Int: FilePriority] {
+        var result: [Int: FilePriority] = [:]
+        for index in highPriorityFiles ?? [] { result[index] = .high }
+        for index in lowPriorityFiles ?? [] { result[index] = .low }
+        return result
+    }
 }
 
 /// A magnet whose metadata hasn't arrived yet. Saved so torrents still

@@ -80,6 +80,8 @@ struct PendingTorrentAdd: Identifiable, Equatable {
     var sequential: Bool
     /// Indices to download; seeded to everything when the file list arrives.
     var wantedFiles: Set<Int> = []
+    /// Non-normal priorities picked before the torrent starts, by file index.
+    var filePriorities: [Int: FilePriority] = [:]
 
     var isMagnet: Bool {
         if case .magnet = source { return true }
@@ -91,7 +93,10 @@ struct PendingTorrentAdd: Identifiable, Equatable {
     /// sorted or filtered copy.
     var fileRows: [FileRow] {
         files.enumerated().map {
-            FileRow(index: $0, path: $1.path, length: $1.length, completedLength: nil)
+            FileRow(
+                index: $0, path: $1.path, length: $1.length, completedLength: nil,
+                priority: filePriorities[$0] ?? .normal
+            )
         }
     }
 
@@ -475,6 +480,8 @@ final class SessionStore {
         let wanted = pending.files.isEmpty || pending.wantedFiles.count == pending.files.count
             ? nil
             : pending.wantedFiles
+        // All-normal is the default; send nothing rather than an empty map.
+        let priorities = pending.filePriorities.isEmpty ? nil : pending.filePriorities
         run("add torrent") { session in
             switch pending.source {
             case .torrentFile(let data):
@@ -482,14 +489,16 @@ final class SessionStore {
                     fileData: data,
                     downloadDirectory: directory,
                     sequential: sequential,
-                    wantedFiles: wanted
+                    wantedFiles: wanted,
+                    filePriorities: priorities
                 )
             case .magnet:
                 _ = try await session.commitMagnet(
                     pending.infoHash,
                     downloadDirectory: directory,
                     sequential: sequential,
-                    wantedFiles: wanted
+                    wantedFiles: wanted,
+                    filePriorities: priorities
                 )
             }
         }
@@ -510,6 +519,20 @@ final class SessionStore {
 
     func setPendingWantedFiles(_ wanted: Set<Int>, id: PendingTorrentAdd.ID) {
         mutatePending(id) { $0.wantedFiles = wanted }
+    }
+
+    func setPendingFilePriority(
+        _ priority: FilePriority, forFiles files: Set<Int>, id: PendingTorrentAdd.ID
+    ) {
+        mutatePending(id) { pending in
+            for index in files where pending.files.indices.contains(index) {
+                if priority == .normal {
+                    pending.filePriorities.removeValue(forKey: index)
+                } else {
+                    pending.filePriorities[index] = priority
+                }
+            }
+        }
     }
 
     private func mutatePending(_ id: PendingTorrentAdd.ID, _ body: (inout PendingTorrentAdd) -> Void) {
@@ -534,6 +557,24 @@ final class SessionStore {
 
     func setWantedFiles(_ wanted: Set<Int>, for infoHash: InfoHash) {
         run("change the file selection") { try await $0.setWantedFiles(wanted, for: infoHash) }
+    }
+
+    func setFilePriority(
+        _ priority: FilePriority, forFiles files: Set<Int>, for infoHash: InfoHash
+    ) {
+        run("change file priority") {
+            try await $0.setFilePriority(priority, forFiles: files, in: infoHash)
+        }
+    }
+
+    /// Caps one torrent's rates. Takes KiB/s the way the fields are labelled;
+    /// 0 means "no limit of its own", leaving only the session's.
+    func setRateLimits(downloadKiB: Int, uploadKiB: Int, for infoHash: InfoHash) {
+        let download = downloadKiB > 0 ? downloadKiB * 1024 : nil
+        let upload = uploadKiB > 0 ? uploadKiB * 1024 : nil
+        run("change the speed limits") {
+            try await $0.setRateLimits(download: download, upload: upload, for: infoHash)
+        }
     }
 
     func dismissPendingAdd(id: PendingTorrentAdd.ID) {

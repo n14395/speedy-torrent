@@ -98,6 +98,10 @@ actor MagnetController {
             errorMessage: nil,
             downloadDirectory: downloadDirectory.path,
             sequential: sequential,
+            // A magnet has no transfer to cap yet; limits become settable once
+            // metadata arrives and it becomes a real torrent.
+            downloadRateLimit: nil,
+            uploadRateLimit: nil,
             addedAt: addedAt,
             pieceLength: 0
         )

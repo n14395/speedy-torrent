@@ -38,6 +38,17 @@ struct TorrentDetailView: View {
     /// engine never converges (removed torrent, rejected empty set).
     @State private var localWantedDeadline: Date?
     @State private var wantedWriteTask: Task<Void, Never>?
+    /// Priority edits the engine hasn't reported back yet, by file index.
+    @State private var localPriorities: [Int: FilePriority] = [:]
+    /// The speed-limit fields, in KiB/s. Seeded from the snapshot when the
+    /// subject changes and owned by the user from then on, so typing is never
+    /// clobbered by a poll.
+    @State private var limitDownloadKiB = 0
+    @State private var limitUploadKiB = 0
+    /// Which torrent the fields above describe. Switching rows blurs the field,
+    /// which commits it — without this the committed value would land on the
+    /// torrent just selected instead of the one it was typed for.
+    @State private var limitSubject: InfoHash?
 
     @State private var showingFolderPicker = false
     /// Folder awaiting confirmation, because moving existing data is costly.
@@ -173,6 +184,14 @@ struct TorrentDetailView: View {
                 .background(Surface.fill)
                 .clipShape(.rect(cornerRadius: Surface.corner))
 
+            if liveHash != nil {
+                speedLimitRow
+                    .padding(.horizontal, 12)
+                    .frame(height: 32)
+                    .background(Surface.fill)
+                    .clipShape(.rect(cornerRadius: Surface.corner))
+            }
+
             fileTree
                 .frame(maxHeight: .infinity)
                 .background(Surface.fill)
@@ -233,6 +252,59 @@ struct TorrentDetailView: View {
                 : "Where this torrent's files are saved")
     }
 
+    /// This torrent's own caps, on top of the session-wide ones in Settings.
+    /// Blank (0) means it just follows the global limit.
+    private var speedLimitRow: some View {
+        let fetching = snapshot?.state == .fetchingMetadata
+        return HStack(spacing: 8) {
+            Text("Speed limits")
+                .font(.system(size: 12))
+            Spacer(minLength: 8)
+            limitField(systemImage: "arrow.down", value: $limitDownloadKiB)
+            limitField(systemImage: "arrow.up", value: $limitUploadKiB)
+            Text("KiB/s")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+        }
+        .disabled(fetching)
+        .opacity(fetching ? 0.4 : 1)
+        .help(fetching
+            ? "Available once the magnet's metadata arrives"
+            : "Caps this torrent alone. 0 follows the global limit in Settings.")
+        .onAppear { syncLimitFields() }
+        .onChange(of: snapshot?.infoHash) { syncLimitFields() }
+    }
+
+    private func limitField(systemImage: String, value: Binding<Int>) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: systemImage)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.secondary)
+            TextField("0", value: value, format: .number)
+                .surfaceField(width: 52)
+                .onSubmit { flushLimitEdit() }
+                .onChange(of: value.wrappedValue) { flushLimitEdit() }
+        }
+    }
+
+    /// Pulls the engine's values into the fields. Only while the user isn't
+    /// mid-edit: the 1 Hz poll would otherwise overwrite half-typed numbers.
+    private func syncLimitFields() {
+        guard let snapshot else { return }
+        limitDownloadKiB = (snapshot.downloadRateLimit ?? 0) / 1024
+        limitUploadKiB = (snapshot.uploadRateLimit ?? 0) / 1024
+        limitSubject = snapshot.infoHash
+    }
+
+    private func flushLimitEdit() {
+        guard let liveHash, limitSubject == liveHash else { return }
+        store.setRateLimits(
+            downloadKiB: max(0, limitDownloadKiB),
+            uploadKiB: max(0, limitUploadKiB),
+            for: liveHash
+        )
+    }
+
     /// An iOS-style switch in the panel's blue — the checkbox this used to be
     /// disappeared against the card.
     private var sequentialToggle: some View {
@@ -278,7 +350,10 @@ struct TorrentDetailView: View {
                     selection: Binding(
                         get: { pending.wantedFiles },
                         set: { store.setPendingWantedFiles($0, id: pending.id) }
-                    )
+                    ),
+                    onSetPriority: { priority, files in
+                        store.setPendingFilePriority(priority, forFiles: files, id: pending.id)
+                    }
                 )
             }
         } else if files.isEmpty {
@@ -286,7 +361,11 @@ struct TorrentDetailView: View {
                 ? "Files can be chosen once the magnet's metadata arrives."
                 : "Metadata not available yet")
         } else {
-            TorrentFileTree(rows: files.fileRows, selection: liveWantedBinding)
+            TorrentFileTree(
+                rows: liveFileRows,
+                selection: liveWantedBinding,
+                onSetPriority: setLivePriority
+            )
         }
     }
 
@@ -313,6 +392,27 @@ struct TorrentDetailView: View {
     // MARK: - Live file selection
 
     /// The engine's selection, overlaid with any edit it hasn't confirmed yet.
+    /// Applies a priority to a live torrent's files. The engine write is cheap
+    /// (no reallocation, no re-check), so it goes straight out; the overlay
+    /// just spares the glyph a wait for the next 1 Hz poll.
+    private func setLivePriority(_ priority: FilePriority, files: Set<Int>) {
+        guard let liveHash else { return }
+        store.setFilePriority(priority, forFiles: files, for: liveHash)
+        for index in files {
+            localPriorities[index] = priority
+        }
+    }
+
+    /// Engine rows with any not-yet-confirmed priority edit applied.
+    private var liveFileRows: [FileRow] {
+        files.fileRows.map { row in
+            guard let pending = localPriorities[row.index] else { return row }
+            var row = row
+            row.priority = pending
+            return row
+        }
+    }
+
     private var liveWantedBinding: Binding<Set<Int>> {
         Binding(
             get: { localWanted ?? Set(files.filter(\.wanted).map(\.index)) },
@@ -350,6 +450,11 @@ struct TorrentDetailView: View {
         trackers = await store.trackerDetails(for: liveHash)
         let fresh = await store.fileStatuses(for: liveHash)
         files = fresh
+        // Priority writes can't be rejected, so agreement is the only exit.
+        if !localPriorities.isEmpty {
+            let engine = Dictionary(uniqueKeysWithValues: fresh.map { ($0.index, $0.priority) })
+            localPriorities = localPriorities.filter { engine[$0.key] != $0.value }
+        }
         // Drop the overlay once the engine agrees — or once it clearly never will.
         if let wanted = localWanted {
             let engineWanted = Set(fresh.filter(\.wanted).map(\.index))

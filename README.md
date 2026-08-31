@@ -21,6 +21,8 @@ Apple's system frameworks.
 - **Per-file selection** with a tri-state checkbox file tree (name/size
   sorting); unwanted files that share no piece with a wanted file are never
   even created on disk
+- **Per-file priorities** (high / normal / low): promote a file and its pieces
+  are requested ahead of the rest, from any peer that has them
 - **Sequential download** as a per-torrent option, for previewing media early
 - In-progress files carry a `.part` suffix and are renamed the instant every
   piece covering them verifies
@@ -44,7 +46,9 @@ Apple's system frameworks.
 - **Fast resume** across launches; tampered files are detected and re-checked,
   and a **Verify Data** action re-hashes on demand
 - Per-torrent download location — existing content is moved safely when
-  changed — plus global speed limits and per-torrent pause/resume
+  changed — plus per-torrent pause/resume
+- **Speed limits** session-wide and per torrent: a torrent's own cap holds it
+  below the global budget without ever being granted more than it
 - Sortable, searchable torrent list with status filters, and a status bar
   showing totals, DHT size, port-mapping state, and encryption mode
 - **Inspector** panel: a live per-torrent **speed graph**, peers (client,
@@ -153,8 +157,8 @@ BEP 3 (peer wire), 5 (DHT), 7 (IPv6 peers), 9 (metadata exchange),
 plus MSE/PE stream encryption.
 
 Not yet: BitTorrent v2 (BEP 52), uTP, UPnP-IGD (NAT-PMP covers most home
-routers), per-file priorities beyond on/off, App Store sandboxing. The module
-boundaries leave room for all of them.
+routers), App Store sandboxing. The module boundaries leave room for all of
+them.
 
 ## Note
 

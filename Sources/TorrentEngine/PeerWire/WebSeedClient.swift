@@ -18,13 +18,29 @@ struct WebSeedClient {
     }
 
     /// Fetches and concatenates the raw bytes of `pieceIndex` from `base`.
-    func fetchPiece(_ pieceIndex: Int, from base: String) async throws -> Data {
+    ///
+    /// The limiters are charged for every byte that actually crossed the wire,
+    /// in the same order the peer wire uses them (the torrent's own bucket
+    /// first, the contended session one last). Because a range arrives in one
+    /// piece and the wait lands afterwards, enforcement here is average-rate:
+    /// expect range-sized bursts rather than a smooth trickle. Only the
+    /// download side is metered — a Range request's own headers are a rounding
+    /// error next to its response.
+    func fetchPiece(
+        _ pieceIndex: Int,
+        from base: String,
+        torrentLimiter: RateLimiter? = nil,
+        sessionLimiter: RateLimiter? = nil
+    ) async throws -> Data {
         var assembled = Data(capacity: info.pieceSize(at: pieceIndex))
         for range in fileRanges(for: pieceIndex) {
             guard let url = Self.fileURL(base: base, info: info, fileIndex: range.fileIndex) else {
                 throw WebSeedError.badURL
             }
-            assembled.append(try await fetch(url, offset: range.offset, length: range.length))
+            assembled.append(try await fetch(
+                url, offset: range.offset, length: range.length,
+                torrentLimiter: torrentLimiter, sessionLimiter: sessionLimiter
+            ))
         }
         return assembled
     }
@@ -47,11 +63,22 @@ struct WebSeedClient {
         return result
     }
 
-    private func fetch(_ url: URL, offset: Int64, length: Int) async throws -> Data {
+    private func fetch(
+        _ url: URL,
+        offset: Int64,
+        length: Int,
+        torrentLimiter: RateLimiter?,
+        sessionLimiter: RateLimiter?
+    ) async throws -> Data {
         var request = URLRequest(url: url)
         request.timeoutInterval = 30
         request.setValue("bytes=\(offset)-\(offset + Int64(length) - 1)", forHTTPHeaderField: "Range")
         let (data, response) = try await session.data(for: request)
+        // Charged before the response is even inspected, and on what arrived
+        // rather than what we keep: a server that ignores Range sends the whole
+        // file down the same link, and that traffic is just as real.
+        await torrentLimiter?.acquire(data.count)
+        await sessionLimiter?.acquire(data.count)
         guard let http = response as? HTTPURLResponse else { throw WebSeedError.shortResponse }
         switch http.statusCode {
         case 206:

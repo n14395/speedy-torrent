@@ -25,9 +25,16 @@ final class PieceManager {
 
     /// Indices into `info.files` the user wants downloaded (never empty).
     private(set) var wantedFiles: Set<Int>
+    /// Non-normal file priorities, by file index. Sparse: the common case (all
+    /// normal) is an empty dictionary.
+    private(set) var filePriorities: [Int: FilePriority]
     /// Pieces overlapping any wanted file (boundary pieces are wanted even
     /// when they extend into unwanted files, so wanted files verify fully).
     private var wantedPieces: [Bool]
+    /// Request priority of each piece: the highest priority among the *wanted*
+    /// files overlapping it. Unwanted files are excluded so their priority
+    /// can't drag a shared boundary piece up or down.
+    private var piecePriority: [FilePriority]
     /// Global byte range of each file.
     private let fileSpans: [(start: Int64, end: Int64)]
 
@@ -67,7 +74,8 @@ final class PieceManager {
         info: TorrentInfo,
         have: Bitfield? = nil,
         sequential: Bool = false,
-        wantedFiles: Set<Int>? = nil
+        wantedFiles: Set<Int>? = nil,
+        filePriorities: [Int: FilePriority] = [:]
     ) {
         self.info = info
         self.sequential = sequential
@@ -86,8 +94,12 @@ final class PieceManager {
         let allFiles = Set(info.files.indices)
         let requested = wantedFiles.map { $0.intersection(allFiles) } ?? allFiles
         self.wantedFiles = requested.isEmpty ? allFiles : requested
+        self.filePriorities = filePriorities.filter {
+            $0.value != .normal && allFiles.contains($0.key)
+        }
         self.wantedPieces = []
-        recomputeWantedPieces()
+        self.piecePriority = []
+        recomputePieceMasks()
 
         if let have {
             for index in 0..<info.pieceCount where have[index] {
@@ -107,24 +119,64 @@ final class PieceManager {
         let clamped = wanted.intersection(Set(info.files.indices))
         guard !clamped.isEmpty, clamped != wantedFiles else { return }
         wantedFiles = clamped
-        recomputeWantedPieces()
+        recomputePieceMasks()
         for index in inProgress.keys where !wantedPieces[index] {
             inProgress[index] = nil
         }
     }
 
-    private func recomputeWantedPieces() {
+    /// Sets the request priority of the given files. Pieces already in flight
+    /// are left alone — priority steers which piece is picked *next*, and
+    /// dropping partial work to honour it would waste what those peers sent.
+    func setPriority(_ priority: FilePriority, for files: Set<Int>) {
+        let clamped = files.intersection(Set(info.files.indices))
+        guard !clamped.isEmpty else { return }
+        var changed = false
+        for index in clamped {
+            let old = filePriorities[index] ?? .normal
+            guard old != priority else { continue }
+            if priority == .normal {
+                filePriorities.removeValue(forKey: index)
+            } else {
+                filePriorities[index] = priority
+            }
+            changed = true
+        }
+        guard changed else { return }
+        recomputePieceMasks()
+    }
+
+    func priority(for file: Int) -> FilePriority {
+        filePriorities[file] ?? .normal
+    }
+
+    /// The files at a given non-normal priority, sorted, or nil when there are
+    /// none — the shape the resume record stores.
+    func fileIndices(at priority: FilePriority) -> [Int]? {
+        let indices = filePriorities.filter { $0.value == priority }.keys.sorted()
+        return indices.isEmpty ? nil : indices
+    }
+
+    /// Rebuilds both per-piece projections of the file table in one walk: which
+    /// pieces are wanted, and at what priority.
+    private func recomputePieceMasks() {
         var mask = [Bool](repeating: false, count: info.pieceCount)
+        // nil = no wanted file covers this piece yet; the first one seeds it
+        // and later ones raise it.
+        var levels = [FilePriority?](repeating: nil, count: info.pieceCount)
         for index in wantedFiles {
             let span = fileSpans[index]
             guard span.end > span.start else { continue } // zero-length file
+            let priority = filePriorities[index] ?? .normal
             let first = Int(span.start / Int64(info.pieceLength))
             let last = Int((span.end - 1) / Int64(info.pieceLength))
             for piece in first...last {
                 mask[piece] = true
+                levels[piece] = max(levels[piece] ?? priority, priority)
             }
         }
         wantedPieces = mask
+        piecePriority = levels.map { $0 ?? .normal }
     }
 
     func isWanted(_ piece: Int) -> Bool {
@@ -245,20 +297,43 @@ final class PieceManager {
         return nil
     }
 
+    /// Picks the next piece to start. Priority comes first — the highest
+    /// priority any candidate offers wins outright — and the usual policy
+    /// (file order, or rarest-first) then chooses within that group. With every
+    /// file at normal priority this is exactly the old behaviour.
     private func pickNewPiece(peerHas: Bitfield) -> Int? {
         if sequential {
+            var best: Int?
+            var bestPriority = FilePriority.low
             for index in 0..<info.pieceCount
             where wantedPieces[index] && !have[index] && inProgress[index] == nil && peerHas[index] {
-                return index
+                let priority = piecePriority[index]
+                // Strictly greater: at equal priority the earlier piece (the
+                // one already held) is the sequential choice.
+                guard best == nil || priority > bestPriority else { continue }
+                best = index
+                bestPriority = priority
+                if priority == .high { break } // nothing later can outrank it
             }
-            return nil
+            return best
         }
-        // Rarest-first with uniform random tie-breaking (reservoir sampling).
+        // Rarest-first with uniform random tie-breaking (reservoir sampling),
+        // applied within the best priority band seen so far.
         var best: Int?
+        var bestPriority = FilePriority.low
         var bestAvailability = Int.max
         var ties = 0
         for index in 0..<info.pieceCount
         where wantedPieces[index] && !have[index] && inProgress[index] == nil && peerHas[index] {
+            let priority = piecePriority[index]
+            if best == nil || priority > bestPriority {
+                best = index
+                bestPriority = priority
+                bestAvailability = availability[index]
+                ties = 1
+                continue
+            }
+            guard priority == bestPriority else { continue } // outranked
             let pieceAvailability = availability[index]
             if pieceAvailability < bestAvailability {
                 best = index
@@ -333,14 +408,21 @@ final class PieceManager {
         pieceVerified(index)
     }
 
-    /// The lowest wanted, missing piece not already being fetched from peers —
-    /// for web seeds to grab without duplicating peer work.
+    /// The most urgent wanted, missing piece not already being fetched from
+    /// peers — for web seeds to grab without duplicating peer work. Ties (the
+    /// usual case, everything normal) go to the lowest piece index.
     func nextMissingWantedPiece() -> Int? {
+        var best: Int?
+        var bestPriority = FilePriority.low
         for index in 0..<info.pieceCount
         where wantedPieces[index] && !have[index] && inProgress[index] == nil {
-            return index
+            let priority = piecePriority[index]
+            guard best == nil || priority > bestPriority else { continue }
+            best = index
+            bestPriority = priority
+            if priority == .high { break }
         }
-        return nil
+        return best
     }
 
     /// Clears all verified state so a full re-check can re-populate it.
