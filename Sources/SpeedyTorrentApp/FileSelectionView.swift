@@ -158,7 +158,7 @@ struct TorrentFileTree: View {
     @AppStorage("fileTreeSortBySize") private var sortBySize = false
     /// Rebuilt only when the file *shape* changes, not when progress ticks.
     @State private var nodes: [TorrentFileNode] = []
-    @State private var builtShape: [Int] = []
+    @State private var builtShape: [String] = []
     /// Which folders are open. Owned here rather than by `OutlineGroup`, whose
     /// disclosure chevron lives in a gutter outside the row — too close to the
     /// card's edge to hit, and too faint to see against this fill.
@@ -191,7 +191,7 @@ struct TorrentFileTree: View {
             .frame(maxHeight: .infinity)
         }
         .onAppear { rebuildIfNeeded() }
-        .onChange(of: rows.map(\.index)) { rebuildIfNeeded() }
+        .onChange(of: shapeKey) { rebuildIfNeeded() }
     }
 
     /// A summary line, not a control strip: what the pane is showing, in the
@@ -244,11 +244,22 @@ struct TorrentFileTree: View {
         Set(rows.map(\.index))
     }
 
+    /// Identifies the tree's *contents*, not just its size. Keying the rebuild
+    /// on indices alone gave every torrent with the same file count the same
+    /// key — selecting a different one in the list left the previous torrent's
+    /// names and folders on screen, since the guard below saw no change.
+    private var shapeKey: [String] {
+        rows.map { "\($0.index)\u{1}" + $0.path.joined(separator: "/") }
+    }
+
     private func rebuildIfNeeded() {
-        let shape = rows.map(\.index)
+        let shape = shapeKey
         guard shape != builtShape || nodes.isEmpty else { return }
         nodes = TorrentFileNode.build(from: rows)
         builtShape = shape
+        // Node ids are paths, so a same-named folder in the torrent just
+        // selected would otherwise inherit the last one's open/closed state.
+        expanded = []
     }
 
     private var displayNodes: [TorrentFileNode] {

@@ -74,6 +74,12 @@ actor UDPSocket {
                 handler(Data(buffer[0..<received]), address)
             }
         }
+        // Close through the cancel handler, which GCD runs only once the event
+        // handler has returned. Closing alongside `cancel()` could pull the
+        // descriptor out from under an in-flight `recvfrom` — and once the
+        // number is recycled elsewhere in the process, read from whatever
+        // reclaimed it.
+        source.setCancelHandler { Darwin.close(fd) }
         source.resume()
         self.source = source
     }
@@ -97,12 +103,9 @@ actor UDPSocket {
     }
 
     func close() {
-        source?.cancel()
+        source?.cancel() // the cancel handler closes the descriptor
         source = nil
-        if fd >= 0 {
-            Darwin.close(fd)
-            fd = -1
-        }
+        fd = -1          // stops `send` using it in the meantime
     }
 }
 

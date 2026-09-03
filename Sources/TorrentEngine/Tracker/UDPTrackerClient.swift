@@ -13,7 +13,9 @@ public struct UDPTrackerClient: Sendable {
               let port = components.port.flatMap(UInt16.init(exactly:))
         else { throw TrackerError.unsupportedURL(urlString) }
 
-        let socket = UDPRequester(host: host, port: port)
+        guard let socket = UDPRequester(host: host, port: port) else {
+            throw TrackerError.unsupportedURL(urlString)
+        }
         defer { socket.cancel() }
         try await socket.waitReady(timeout: .seconds(10))
 
@@ -121,10 +123,13 @@ actor UDPRequester {
 
     private static let maxBuffered = 64
 
-    init(host: String, port: UInt16) {
+    /// Fails rather than trapping on a port a `.torrent` file supplied: tracker
+    /// URLs are untrusted input, and the caller already has an error for it.
+    init?(host: String, port: UInt16) {
+        guard let endpointPort = NWEndpoint.Port(rawValue: port) else { return nil }
         connection = NWConnection(
             host: NWEndpoint.Host(host),
-            port: NWEndpoint.Port(rawValue: port)!,
+            port: endpointPort,
             using: .udp
         )
     }

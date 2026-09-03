@@ -26,6 +26,14 @@ enum MSEHandshake {
 
     private static var prime: BigUInt { BigUInt(bigEndianBytes: primeBytes) }
     private static var generator: BigUInt { BigUInt(bigEndianBytes: [2]) }
+    private static var one: BigUInt { BigUInt(bigEndianBytes: [1]) }
+
+    /// P − 1. The prime's low byte is 0xFF, so this borrows nothing.
+    private static var primeMinusOne: BigUInt {
+        var bytes = primeBytes
+        bytes[bytes.count - 1] -= 1
+        return BigUInt(bigEndianBytes: bytes)
+    }
 
     // MARK: - Diffie–Hellman
 
@@ -40,10 +48,15 @@ enum MSEHandshake {
     }
 
     /// The shared secret S = Y_peer^x mod P, as 96 big-endian bytes.
-    static func sharedSecret(peerPublicKey: [UInt8], privateKey: BigUInt) -> [UInt8] {
-        BigUInt(bigEndianBytes: peerPublicKey)
-            .modExp(privateKey, modulus: prime)
-            .bigEndianBytes(count: keyLength)
+    ///
+    /// Returns nil for the degenerate public keys 0, 1 and P−1, each of which
+    /// collapses the secret to a value the peer can predict without knowing our
+    /// private exponent. MSE is obfuscation rather than a security boundary, so
+    /// this costs little and closes the one case where it claims to be more.
+    static func sharedSecret(peerPublicKey: [UInt8], privateKey: BigUInt) -> [UInt8]? {
+        let peer = BigUInt(bigEndianBytes: peerPublicKey)
+        guard !peer.isZero, peer != one, peer != primeMinusOne else { return nil }
+        return peer.modExp(privateKey, modulus: prime).bigEndianBytes(count: keyLength)
     }
 
     // MARK: - Derived values

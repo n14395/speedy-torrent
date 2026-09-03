@@ -56,6 +56,14 @@ targets:
         LSApplicationCategoryType: public.app-category.utilities
         NSHighResolutionCapable: true
         NSPrincipalClass: NSApplication
+        # Trackers and web seeds are third-party endpoints that are
+        # overwhelmingly plain HTTP and cannot be enumerated ahead of time, so
+        # ATS has to be off for them or every http:// announce fails with
+        # "requires the use of a secure connection". Content integrity does not
+        # depend on the transport: every piece is SHA-1 verified against the
+        # info dictionary before it is written.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
         CFBundleURLTypes:
           - CFBundleURLName: Magnet Link
             CFBundleURLSchemes: [magnet]

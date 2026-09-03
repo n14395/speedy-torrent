@@ -15,7 +15,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "4F1545B8FC53E321B1E70467"
+               BlueprintIdentifier = "C1AE12A6EAD840B16FE749F3"
                BuildableName = "SpeedyTorrentApp.app"
                BlueprintName = "SpeedyTorrentApp"
                ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
@@ -29,7 +29,7 @@
             buildForAnalyzing = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "109EC75655E46771D9F1DE38"
+               BlueprintIdentifier = "F66457859E39F4AFB8886996"
                BuildableName = "TorrentEngineTests.xctest"
                BlueprintName = "TorrentEngineTests"
                ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
@@ -43,7 +43,7 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "F62CBED7B6D3C92EB663CA87"
+               BlueprintIdentifier = "506A736B081CB3DE77E9FCF7"
                BuildableName = "storrent"
                BlueprintName = "storrent"
                ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
@@ -60,7 +60,7 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "4F1545B8FC53E321B1E70467"
+            BlueprintIdentifier = "C1AE12A6EAD840B16FE749F3"
             BuildableName = "SpeedyTorrentApp.app"
             BlueprintName = "SpeedyTorrentApp"
             ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
@@ -72,7 +72,7 @@
             parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "109EC75655E46771D9F1DE38"
+               BlueprintIdentifier = "F66457859E39F4AFB8886996"
                BuildableName = "TorrentEngineTests.xctest"
                BlueprintName = "TorrentEngineTests"
                ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
@@ -96,7 +96,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "4F1545B8FC53E321B1E70467"
+            BlueprintIdentifier = "C1AE12A6EAD840B16FE749F3"
             BuildableName = "SpeedyTorrentApp.app"
             BlueprintName = "SpeedyTorrentApp"
             ReferencedContainer = "container:SpeedyTorrent.xcodeproj">
@@ -115,7 +115,7 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "4F1545B8FC53E321B1E70467"
+            BlueprintIdentifier = "C1AE12A6EAD840B16FE749F3"
             BuildableName = "SpeedyTorrentApp.app"
             BlueprintName = "SpeedyTorrentApp"
             ReferencedContainer = "container:SpeedyTorrent.xcodeproj">

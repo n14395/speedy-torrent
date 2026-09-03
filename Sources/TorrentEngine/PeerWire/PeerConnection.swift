@@ -10,6 +10,10 @@ actor PeerConnection {
 
     private let connection: NWConnection
     private var buffer = Data()
+    /// Bytes before this index in `buffer` have already been handed out.
+    /// Advancing an index beats `removeFirst`, which copied the remainder on
+    /// every read and made the byte-at-a-time MSE scan quadratic.
+    private var bufferOffset = 0
     private var receivedChunks: [Data] = []
     private var closed = false
     private var closeError: Error?
@@ -82,22 +86,49 @@ actor PeerConnection {
         }
         pump()
         connection.start(queue: DispatchQueue(label: "peer-\(address)"))
+        if case .ready = state { return }
 
         let deadline = ContinuousClock.now.advanced(by: timeout)
-        while ContinuousClock.now < deadline {
-            switch state {
-            case .ready:
-                return
-            case .failed(let error):
-                throw PeerWireError.network(error.localizedDescription)
-            case .cancelled:
-                throw PeerWireError.connectionClosed
-            default:
-                try await Task.sleep(for: .milliseconds(20))
-            }
+        let timeoutTask = Task { [weak self] in
+            try? await Task.sleep(until: deadline, clock: .continuous)
+            await self?.failReadyWaiter(PeerWireError.timeout)
         }
-        connection.cancel()
-        throw PeerWireError.timeout
+        defer { timeoutTask.cancel() }
+        do {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                readyWaiter = continuation
+                resolveReadyWaiter() // in case the state moved before we parked
+            }
+        } catch {
+            connection.cancel()
+            throw error
+        }
+    }
+
+    /// Parked caller of `start`, waiting for the connection to become ready.
+    private var readyWaiter: CheckedContinuation<Void, Error>?
+
+    private func resolveReadyWaiter() {
+        guard let continuation = readyWaiter else { return }
+        switch state {
+        case .ready:
+            readyWaiter = nil
+            continuation.resume()
+        case .failed(let error):
+            readyWaiter = nil
+            continuation.resume(throwing: PeerWireError.network(error.localizedDescription))
+        case .cancelled:
+            readyWaiter = nil
+            continuation.resume(throwing: PeerWireError.connectionClosed)
+        default:
+            break
+        }
+    }
+
+    private func failReadyWaiter(_ error: Error) {
+        guard let continuation = readyWaiter else { return }
+        readyWaiter = nil
+        continuation.resume(throwing: error)
     }
 
     nonisolated func close() {
@@ -115,6 +146,8 @@ actor PeerConnection {
         default:
             break
         }
+        resolveReadyWaiter()
+        if closed { serviceWaiter() }
     }
 
     private nonisolated func pump() {
@@ -150,30 +183,96 @@ actor PeerConnection {
         } else {
             pump()
         }
+        serviceWaiter()
     }
 
     // MARK: - Reading
 
-    /// Waits until `count` bytes are buffered and returns them.
-    private func receiveExactly(_ count: Int, deadline: ContinuousClock.Instant) async throws -> Data {
-        while true {
-            if !receivedChunks.isEmpty {
-                for chunk in receivedChunks { buffer.append(chunk) }
-                receivedChunks.removeAll(keepingCapacity: true)
-            }
-            if buffer.count >= count {
-                let out = buffer.prefix(count)
-                buffer.removeFirst(count)
-                return Data(out)
-            }
-            if closed {
-                throw closeError ?? PeerWireError.connectionClosed
-            }
-            if ContinuousClock.now >= deadline {
-                throw PeerWireError.timeout
-            }
-            try await Task.sleep(for: .milliseconds(10))
+    /// The single outstanding reader. Only one exists at a time — the peer loop
+    /// reads sequentially and the handshakes are strictly ordered. `generation`
+    /// lets a timeout fire harmlessly against a read that has since replaced it.
+    private struct Waiter {
+        let count: Int
+        let generation: UInt64
+        let continuation: CheckedContinuation<Data, Error>
+    }
+    private var waiter: Waiter?
+    private var waiterGeneration: UInt64 = 0
+
+    private func drainChunks() {
+        guard !receivedChunks.isEmpty else { return }
+        for chunk in receivedChunks { buffer.append(chunk) }
+        receivedChunks.removeAll(keepingCapacity: true)
+    }
+
+    private var availableBytes: Int { buffer.count - bufferOffset }
+
+    /// Drops the already-consumed prefix. Called when it grows large, and before
+    /// any in-place rewrite of the buffer.
+    private func compactBuffer() {
+        guard bufferOffset > 0 else { return }
+        buffer.removeFirst(bufferOffset)
+        bufferOffset = 0
+    }
+
+    private func takeExactly(_ count: Int) -> Data {
+        let start = buffer.startIndex + bufferOffset
+        let out = Data(buffer[start..<start + count])
+        bufferOffset += count
+        // Amortised compaction: reclaim once the consumed prefix is both large
+        // and most of the buffer.
+        if bufferOffset > 4096, bufferOffset * 2 >= buffer.count {
+            compactBuffer()
         }
+        return out
+    }
+
+    /// Suspends until `count` bytes are buffered, the connection closes, or the
+    /// deadline passes.
+    ///
+    /// This used to poll every 10 ms, so every connected peer held a task waking
+    /// 100 times a second whether or not traffic was flowing — tens of thousands
+    /// of wakeups per second across a normal peer set, and up to 10 ms of added
+    /// latency on every message.
+    private func receiveExactly(_ count: Int, deadline: ContinuousClock.Instant) async throws -> Data {
+        drainChunks()
+        if availableBytes >= count { return takeExactly(count) }
+        if closed { throw closeError ?? PeerWireError.connectionClosed }
+        if ContinuousClock.now >= deadline { throw PeerWireError.timeout }
+        precondition(waiter == nil, "PeerConnection supports one reader at a time")
+
+        waiterGeneration &+= 1
+        let generation = waiterGeneration
+        let timeout = Task { [weak self] in
+            try? await Task.sleep(until: deadline, clock: .continuous)
+            await self?.failWaiter(generation: generation, with: PeerWireError.timeout)
+        }
+        defer { timeout.cancel() }
+        return try await withCheckedThrowingContinuation { continuation in
+            // Runs synchronously before this function suspends, so the timeout
+            // task above cannot slip in ahead of the waiter being installed.
+            waiter = Waiter(count: count, generation: generation, continuation: continuation)
+        }
+    }
+
+    /// Hands buffered bytes to the waiting reader once its request can be met,
+    /// or fails it if the connection died first.
+    private func serviceWaiter() {
+        guard let pending = waiter else { return }
+        drainChunks()
+        if availableBytes >= pending.count {
+            waiter = nil
+            pending.continuation.resume(returning: takeExactly(pending.count))
+        } else if closed {
+            waiter = nil
+            pending.continuation.resume(throwing: closeError ?? PeerWireError.connectionClosed)
+        }
+    }
+
+    private func failWaiter(generation: UInt64, with error: Error) {
+        guard let pending = waiter, pending.generation == generation else { return }
+        waiter = nil
+        pending.continuation.resume(throwing: error)
     }
 
     /// Reads one framed message. `idleTimeout` bounds the wait for the start
@@ -195,6 +294,54 @@ actor PeerConnection {
     }
 
     // MARK: - Writing
+
+    /// Cap on unsent messages. A peer that isn't draining is a dead peer.
+    private static let maxQueuedMessages = 512
+
+    private var outbound: [Data] = []
+    private var draining = false
+
+    /// Queues a message and returns without waiting for the wire.
+    ///
+    /// Callers used to `await send(_:)`, which parks on the upload rate limiter.
+    /// Doing that in a loop — a HAVE to every peer on each completed piece, the
+    /// keep-alive sweep, the choker's round — stalled the *calling* peer's read
+    /// loop for as long as all those sends took to clear the bucket, which on
+    /// the peer that had just delivered a piece is exactly the connection you
+    /// least want to stall.
+    ///
+    /// Everything after the BitTorrent handshake must go through here rather
+    /// than `send`: the queue is what keeps `bitfield` ahead of any `have` that
+    /// lands while it is still waiting on the limiter.
+    func enqueue(_ message: PeerMessage) {
+        guard !closed else { return }
+        guard outbound.count < Self.maxQueuedMessages else {
+            outbound.removeAll()
+            connection.cancel()
+            return
+        }
+        outbound.append(message.encoded())
+        guard !draining else { return }
+        draining = true
+        Task { await self.drain() }
+    }
+
+    /// Single drain task per connection, so the RC4 keystream stays aligned
+    /// with the order bytes hit the socket.
+    private func drain() async {
+        while !outbound.isEmpty, !closed {
+            let payload = outbound.removeFirst()
+            await torrentUploadLimiter?.acquire(payload.count)
+            await uploadLimiter?.acquire(payload.count)
+            guard !closed else { break }
+            bytesSent += Int64(payload.count)
+            // No await between the cipher and the send, so this pair is atomic
+            // against any other writer on this actor.
+            let wire = rc4Send != nil ? rc4Send!.process(payload) : payload
+            connection.send(content: wire, completion: .contentProcessed { _ in })
+        }
+        draining = false
+    }
 
     func send(_ message: PeerMessage) async throws {
         try await sendRaw(message.encoded())
@@ -227,6 +374,9 @@ actor PeerConnection {
     /// already arrived after the handshake in the same TCP segment.
     private func installCiphers(send: RC4, receive: RC4) {
         var receive = receive
+        // Only the unread remainder is ciphertext; drop the consumed prefix so
+        // the decrypt below lines up with the keystream.
+        compactBuffer()
         if !buffer.isEmpty { buffer = receive.process(buffer) }
         for index in receivedChunks.indices {
             receivedChunks[index] = receive.process(receivedChunks[index])
@@ -268,7 +418,11 @@ actor PeerConnection {
         try await sendRaw(Data(publicKey + randomPad()))
 
         let yb = try await receiveExactly(MSEHandshake.keyLength, deadline: deadline)
-        let secret = MSEHandshake.sharedSecret(peerPublicKey: [UInt8](yb), privateKey: privateKey)
+        guard let secret = MSEHandshake.sharedSecret(
+            peerPublicKey: [UInt8](yb), privateKey: privateKey
+        ) else {
+            throw PeerWireError.handshakeFailed("MSE: degenerate public key")
+        }
         let skey = [UInt8](infoHash.data)
         var encrypt = MSEHandshake.rc4Cipher(label: "keyA", secret: secret, skey: skey) // A→B
         var decrypt = MSEHandshake.rc4Cipher(label: "keyB", secret: secret, skey: skey) // B→A
@@ -329,9 +483,11 @@ actor PeerConnection {
         let publicKey = MSEHandshake.publicKey(privateKey: privateKey)
         try await sendRaw(Data(publicKey + randomPad()))
 
-        let secret = MSEHandshake.sharedSecret(
+        guard let secret = MSEHandshake.sharedSecret(
             peerPublicKey: Array(ya.prefix(MSEHandshake.keyLength)), privateKey: privateKey
-        )
+        ) else {
+            throw PeerWireError.handshakeFailed("MSE: degenerate public key")
+        }
 
         // Skip PadA by syncing to the plaintext HASH('req1', S), then read the
         // obfuscated SKEY marker and identify which torrent it names.
@@ -385,7 +541,10 @@ actor PeerConnection {
             installCiphers(send: encrypt, receive: decrypt)
         }
         // Any initial payload the peer inlined precedes the following stream.
-        if !iaPlain.isEmpty { buffer = iaPlain + buffer }
+        if !iaPlain.isEmpty {
+            compactBuffer()
+            buffer = iaPlain + buffer
+        }
         return (infoHash, cryptoSelect == MSEHandshake.cryptoRC4)
     }
 

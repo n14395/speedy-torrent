@@ -20,6 +20,9 @@ struct ResumeData: Codable, Sendable {
     var downloadRateLimit: Int?
     var uploadRateLimit: Int?
     var addedAt: Double
+    /// Whether the tracker was already told this torrent finished (absent =
+    /// no, for records written before the flag existed).
+    var announcedCompleted: Bool?
     /// Relative path → modification time at last save; a mismatch on load
     /// forces a full hash re-check instead of trusting the bitfield.
     var fileStamps: [String: Double]
@@ -47,9 +50,11 @@ struct MagnetRecord: Codable, Sendable {
     var addedAt: Double
 }
 
-/// One restored item, in queue order.
+/// One restored item, in queue order. `infoHashHex` is the state directory's
+/// own name, so the caller can identify an entry whose `meta.torrent` no longer
+/// parses instead of silently dropping it.
 enum RestoreEntry: Sendable {
-    case torrent(data: Data, resume: ResumeData?)
+    case torrent(infoHashHex: String, data: Data, resume: ResumeData?)
     case magnet(MagnetRecord)
 }
 
@@ -71,14 +76,14 @@ struct PersistenceStore: Sendable {
     func saveTorrentData(_ data: Data, for infoHash: InfoHash) {
         let dir = directory(for: infoHash)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try? data.write(to: dir.appendingPathComponent("meta.torrent"))
+        try? data.write(to: dir.appendingPathComponent("meta.torrent"), options: .atomic)
     }
 
     func saveResume(_ resume: ResumeData, for infoHash: InfoHash) {
         let dir = directory(for: infoHash)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         if let encoded = try? JSONEncoder().encode(resume) {
-            try? encoded.write(to: dir.appendingPathComponent("resume.json"))
+            try? encoded.write(to: dir.appendingPathComponent("resume.json"), options: .atomic)
         }
     }
 
@@ -90,7 +95,7 @@ struct PersistenceStore: Sendable {
         let dir = directory(for: infoHash)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         if let encoded = try? JSONEncoder().encode(record) {
-            try? encoded.write(to: dir.appendingPathComponent("magnet.json"))
+            try? encoded.write(to: dir.appendingPathComponent("magnet.json"), options: .atomic)
         }
     }
 
@@ -104,7 +109,7 @@ struct PersistenceStore: Sendable {
 
     func saveStats(_ stats: StatsFile) {
         if let encoded = try? JSONEncoder().encode(stats) {
-            try? encoded.write(to: baseURL.appendingPathComponent("stats.json"))
+            try? encoded.write(to: baseURL.appendingPathComponent("stats.json"), options: .atomic)
         }
     }
 
@@ -116,7 +121,7 @@ struct PersistenceStore: Sendable {
     /// Persists the list order (= queue priority) as hex hashes.
     func saveQueueOrder(_ hexHashes: [String]) {
         if let encoded = try? JSONEncoder().encode(hexHashes) {
-            try? encoded.write(to: baseURL.appendingPathComponent("queue.json"))
+            try? encoded.write(to: baseURL.appendingPathComponent("queue.json"), options: .atomic)
         }
     }
 
@@ -140,7 +145,15 @@ struct PersistenceStore: Sendable {
             if let torrentData = try? Data(contentsOf: entry.appendingPathComponent("meta.torrent")) {
                 let resume = (try? Data(contentsOf: entry.appendingPathComponent("resume.json")))
                     .flatMap { try? JSONDecoder().decode(ResumeData.self, from: $0) }
-                results.append((.torrent(data: torrentData, resume: resume), position, resume?.addedAt ?? 0))
+                results.append((
+                    .torrent(
+                        infoHashHex: entry.lastPathComponent,
+                        data: torrentData,
+                        resume: resume
+                    ),
+                    position,
+                    resume?.addedAt ?? 0
+                ))
             } else if let magnetData = try? Data(contentsOf: entry.appendingPathComponent("magnet.json")),
                       let record = try? JSONDecoder().decode(MagnetRecord.self, from: magnetData) {
                 results.append((.magnet(record), position, record.addedAt))
@@ -154,7 +167,7 @@ struct PersistenceStore: Sendable {
     /// Resolved torrents only (magnets excluded).
     func loadAll() -> [(torrentData: Data, resume: ResumeData?)] {
         loadEntries().compactMap { entry in
-            guard case .torrent(let data, let resume) = entry else { return nil }
+            guard case .torrent(_, let data, let resume) = entry else { return nil }
             return (torrentData: data, resume: resume)
         }
     }

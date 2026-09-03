@@ -110,15 +110,38 @@ actor FileStore {
     }
 
     /// Removes all downloaded content (final and in-progress) from disk.
+    ///
+    /// Removes this torrent's own files rather than its content directory
+    /// wholesale: two torrents can share a top-level directory name in one
+    /// download folder — re-releases routinely do — and deleting the directory
+    /// took the other one's data with it. Directories are pruned afterwards,
+    /// deepest first and only when empty, so anything the user put alongside
+    /// the content survives.
     func deleteAllFiles() {
         close()
         let fileManager = FileManager.default
-        if info.isDirectory {
-            try? fileManager.removeItem(at: contentRootURL)
-        } else {
-            let span = spans[0]
+        for span in spans {
             try? fileManager.removeItem(at: span.url)
             try? fileManager.removeItem(at: partURL(span))
+        }
+        guard info.isDirectory else { return }
+
+        let rootPath = contentRootURL.standardizedFileURL.path
+        var candidates = Set<URL>()
+        for span in spans {
+            var parent = span.url.deletingLastPathComponent().standardizedFileURL
+            while parent.path.hasPrefix(rootPath) {
+                candidates.insert(parent)
+                if parent.path == rootPath { break }
+                parent = parent.deletingLastPathComponent()
+            }
+        }
+        candidates.insert(contentRootURL.standardizedFileURL)
+        for directory in candidates.sorted(by: { $0.path.count > $1.path.count }) {
+            let contents = try? fileManager.contentsOfDirectory(atPath: directory.path)
+            if contents?.isEmpty == true {
+                try? fileManager.removeItem(at: directory)
+            }
         }
     }
 
@@ -293,12 +316,30 @@ actor FileStore {
         try readBlock(index: index, begin: 0, length: info.pieceSize(at: index))
     }
 
+    /// How far through the current `verifyAllPieces` scan we are, 0...1.
+    /// Polled by the controller's tick rather than pushed through a callback,
+    /// which keeps the reporting rate at 1 Hz for free.
+    private(set) var verifyProgress: Double = 0
+
     /// Hash-checks every piece against the metadata (initial add of existing
     /// data, or resume without trusted state). Unreadable pieces are simply
     /// not marked.
-    func verifyAllPieces() -> Bitfield {
+    ///
+    /// Yields periodically so a 50 GB re-check does not hold this actor for
+    /// minutes, and honours cancellation so removing a torrent mid-scan stops
+    /// the work instead of waiting it out. A cancelled scan returns what it
+    /// verified so far; callers treat that as "these pieces are known good",
+    /// which is true — it is only incomplete.
+    func verifyAllPieces() async -> Bitfield {
         var have = Bitfield(count: info.pieceCount)
+        verifyProgress = 0
+        defer { verifyProgress = 0 }
         for index in 0..<info.pieceCount {
+            if index % 64 == 0 {
+                if Task.isCancelled { return have }
+                verifyProgress = Double(index) / Double(info.pieceCount)
+                await Task.yield()
+            }
             guard let piece = try? readPiece(index) else { continue }
             if Data(Insecure.SHA1.hash(data: piece)) == info.pieceHashes[index] {
                 have[index] = true

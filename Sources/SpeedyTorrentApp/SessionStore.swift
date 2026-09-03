@@ -26,6 +26,8 @@ enum Defaults {
     static let menuBarShowsIcon = "menuBarShowsIcon"
     static let menuBarShowsDownloadRate = "menuBarShowsDownloadRate"
     static let menuBarShowsUploadRate = "menuBarShowsUploadRate"
+    /// Whether the popup shows its whole torrent list rather than the first few.
+    static let menuBarExpanded = "menuBarExpanded"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -46,6 +48,7 @@ enum Defaults {
             menuBarShowsIcon: true,
             menuBarShowsDownloadRate: true,
             menuBarShowsUploadRate: true,
+            menuBarExpanded: false,
         ])
     }
 }
@@ -211,7 +214,7 @@ final class SessionStore {
                 await self.refreshPendingMetadata(session)
                 self.portMappingStatus = await session.portMappingStatus()
                 self.dhtNodeCount = await session.dhtNodeCount()
-                self.stats = await session.statistics()
+                self.stats = await session.statistics(using: snaps)
                 try? await Task.sleep(for: .seconds(1))
             }
         }

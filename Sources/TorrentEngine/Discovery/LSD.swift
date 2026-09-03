@@ -128,6 +128,8 @@ actor LSDService {
                 )
             }
         }
+        // See UDPSocket: closing alongside `cancel()` races the event handler.
+        source.setCancelHandler { Darwin.close(fd) }
         source.resume()
         self.source = source
     }
@@ -151,11 +153,8 @@ actor LSDService {
     }
 
     func stop() {
-        source?.cancel()
+        source?.cancel() // the cancel handler closes the descriptor
         source = nil
-        if fd >= 0 {
-            Darwin.close(fd)
-            fd = -1
-        }
+        fd = -1          // stops `announce` using it in the meantime
     }
 }

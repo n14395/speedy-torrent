@@ -19,6 +19,57 @@ public enum EncryptionPolicy: String, Sendable, CaseIterable {
     case required
 }
 
+/// One-shot resume guard for an `NWListener`'s readiness. Its state handler
+/// fires repeatedly and off-actor, so the continuation needs a lock and a
+/// "already resumed" flag to avoid a double resume (which traps).
+private final class ListenerReadyGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Error>?
+    private var armed = false
+    private var lastWaitingReason: String?
+
+    func arm(_ continuation: CheckedContinuation<Void, Error>) {
+        lock.lock()
+        self.continuation = continuation
+        armed = true
+        lock.unlock()
+    }
+
+    func succeed() { resume(failure: nil) }
+
+    func fail(_ reason: String) { resume(failure: reason) }
+
+    /// `.waiting` is recorded rather than acted on — it may clear on its own.
+    func noteWaiting(_ reason: String) {
+        lock.lock()
+        lastWaitingReason = reason
+        lock.unlock()
+    }
+
+    /// Grace period over: whatever kept us waiting is the failure.
+    func expire() {
+        lock.lock()
+        let reason = lastWaitingReason
+        lock.unlock()
+        resume(failure: reason ?? "timed out binding the port")
+    }
+
+    private func resume(failure: String?) {
+        lock.lock()
+        guard armed, let continuation else {
+            lock.unlock()
+            return
+        }
+        self.continuation = nil
+        lock.unlock()
+        if let failure {
+            continuation.resume(throwing: SessionError.listenFailed(failure))
+        } else {
+            continuation.resume()
+        }
+    }
+}
+
 /// The engine's top-level API: owns all torrents, the shared listening socket,
 /// and global settings.
 public actor TorrentSession {
@@ -147,8 +198,18 @@ public actor TorrentSession {
         guard let persistence else { return }
         for entry in persistence.loadEntries() {
             switch entry {
-            case .torrent(let torrentData, let resume):
-                guard let meta = try? TorrentMetaInfo(torrentFileData: torrentData) else { continue }
+            case .torrent(let infoHashHex, let torrentData, let resume):
+                let meta: TorrentMetaInfo
+                do {
+                    meta = try TorrentMetaInfo(torrentFileData: torrentData)
+                } catch {
+                    // Don't drop it. A torrent whose metadata no longer parses
+                    // — a truncated write, or a validation rule this build
+                    // tightened — would otherwise just vanish from the user's
+                    // list with no way to tell what happened or remove it.
+                    noteUnreadable(infoHashHex: infoHashHex, reason: "\(error)")
+                    continue
+                }
                 let directory = resume.map { URL(fileURLWithPath: $0.downloadDirectory) }
                 _ = try? await addTorrent(
                     info: meta.info,
@@ -173,6 +234,45 @@ public actor TorrentSession {
                 )
             }
         }
+    }
+
+    /// Persisted torrents whose `meta.torrent` could not be parsed on restore,
+    /// by info hash → reason. They appear in the list as `.failed` so the user
+    /// can see and remove them; nothing else in the engine touches them.
+    private var unreadableTorrents: [InfoHash: String] = [:]
+
+    private func noteUnreadable(infoHashHex: String, reason: String) {
+        guard let hash = InfoHash(hex: infoHashHex),
+              controllers[hash] == nil, magnets[hash] == nil
+        else { return }
+        unreadableTorrents[hash] = reason
+        if !order.contains(hash) { order.append(hash) }
+    }
+
+    /// The list row for an unreadable torrent: enough to identify and remove it.
+    private func unreadableSnapshot(_ hash: InfoHash, reason: String) -> TorrentSnapshot {
+        TorrentSnapshot(
+            infoHash: hash,
+            name: hash.hexString,
+            totalLength: 0,
+            wantedLength: 0,
+            completedLength: 0,
+            downloadedTotal: 0,
+            uploadedTotal: 0,
+            downloadRate: 0,
+            uploadRate: 0,
+            state: .failed,
+            peerCount: 0,
+            pieceCount: 0,
+            havePieces: 0,
+            errorMessage: "Could not read this torrent's metadata: \(reason)",
+            downloadDirectory: configuration.downloadDirectory.path,
+            sequential: false,
+            downloadRateLimit: nil,
+            uploadRateLimit: nil,
+            addedAt: 0,
+            pieceLength: 0
+        )
     }
 
     // MARK: - Torrent management
@@ -208,7 +308,8 @@ public actor TorrentSession {
         filePriorities: [Int: FilePriority]? = nil,
         resume: ResumeData? = nil,
         persistTorrentData: Data? = nil,
-        webSeeds: [String] = []
+        webSeeds: [String] = [],
+        insertAt: Int? = nil
     ) async throws -> InfoHash {
         guard controllers[info.infoHash] == nil else { throw SessionError.duplicateTorrent }
         var config = ControllerConfig()
@@ -234,7 +335,14 @@ public actor TorrentSession {
             webSeeds: webSeeds
         )
         controllers[info.infoHash] = controller
-        order.append(info.infoHash)
+        // A magnet that resolves keeps the slot it was dragged to, rather than
+        // being appended and losing the user's ordering — which also decides
+        // which torrents an active-download cap admits.
+        if let insertAt, insertAt <= order.count {
+            order.insert(info.infoHash, at: insertAt)
+        } else {
+            order.append(info.infoHash)
+        }
         // Baseline the stats counters now (not at first observation): totals
         // restored from disk must not count into this session, but everything
         // transferred from here on must — even before the first snapshot.
@@ -391,6 +499,7 @@ public actor TorrentSession {
         let directory = await magnetController.downloadDirectory
         let sequential = await magnetController.sequential
         await magnetController.stop()
+        let queuePosition = order.firstIndex(of: magnet.infoHash)
         order.removeAll { $0 == magnet.infoHash }
         // The pending-magnet marker is superseded by real torrent state.
         persistence?.removeMagnet(for: magnet.infoHash)
@@ -405,7 +514,8 @@ public actor TorrentSession {
             downloadDirectory: directory,
             sequential: sequential,
             resume: nil,
-            persistTorrentData: assembled
+            persistTorrentData: assembled,
+            insertAt: queuePosition
         ) else { return }
         if let controller = controllers[hash] {
             await controller.addKnownPeers(Array(transferredPeers))
@@ -618,6 +728,13 @@ public actor TorrentSession {
     }
 
     public func removeTorrent(_ infoHash: InfoHash, deleteFiles: Bool = false) async throws {
+        if unreadableTorrents.removeValue(forKey: infoHash) != nil {
+            // Nothing was ever started for it; just forget the state directory.
+            order.removeAll { $0 == infoHash }
+            persistence?.remove(for: infoHash)
+            persistOrder()
+            return
+        }
         if let magnet = magnets.removeValue(forKey: infoHash) {
             order.removeAll { $0 == infoHash }
             statsBaselines[infoHash] = nil
@@ -712,6 +829,8 @@ public actor TorrentSession {
                 result.append(await controller.snapshot())
             } else if let magnet = magnets[infoHash] {
                 result.append(await magnet.snapshot())
+            } else if let reason = unreadableTorrents[infoHash] {
+                result.append(unreadableSnapshot(infoHash, reason: reason))
             }
         }
         for index in result.indices {
@@ -727,13 +846,20 @@ public actor TorrentSession {
     // MARK: - Statistics
 
     /// Global transfer counters for this session and all-time (persisted).
-    public func statistics() async -> SessionStatistics {
-        // Fold in any transfer since the last snapshots() call.
-        var current: [TorrentSnapshot] = []
-        for controller in controllers.values {
-            current.append(await controller.snapshot())
+    /// Pass the snapshots from a just-completed `snapshots()` call rather than
+    /// letting this build a second set — the UI polls both every second, and
+    /// each snapshot is not free.
+    public func statistics(using snapshots: [TorrentSnapshot]? = nil) async -> SessionStatistics {
+        // Fold in any transfer since the last observation.
+        if let snapshots {
+            accumulateStats(snapshots)
+        } else {
+            var current: [TorrentSnapshot] = []
+            for controller in controllers.values {
+                current.append(await controller.snapshot())
+            }
+            accumulateStats(current)
         }
-        accumulateStats(current)
         let uptime = Date().timeIntervalSince(sessionStart)
         return SessionStatistics(
             sessionDownloaded: sessionDownloaded,
@@ -835,7 +961,17 @@ public actor TorrentSession {
             }
             Task { await self.handleIncoming(connection) }
         }
-        listener.start(queue: DispatchQueue(label: "torrent-listener"))
+        // Constructing an NWListener proves nothing: a busy port surfaces
+        // asynchronously through the state handler (usually as `.waiting` with
+        // EADDRINUSE, not `.failed`). Without this the app ran with no incoming
+        // connections at all, no error anywhere, and DHT and port mapping
+        // pointed at a port nothing was bound to.
+        do {
+            try await Self.waitUntilReady(listener)
+        } catch {
+            listener.cancel()
+            throw error
+        }
         self.listener = listener
 
         if configuration.enablePortMapping {
@@ -855,6 +991,31 @@ public actor TorrentSession {
             lsdTask = Task { await self.runLSDAnnounce() }
         }
         return configuration.listenPort
+    }
+
+    /// Starts `listener` and returns once it has actually bound, throwing if it
+    /// cannot. `.waiting` is not treated as failure immediately — it also covers
+    /// transient conditions like an interface coming up — but a listener still
+    /// waiting when the grace period expires has not got the port.
+    private static func waitUntilReady(_ listener: NWListener) async throws {
+        let gate = ListenerReadyGate()
+        try await withCheckedThrowingContinuation { continuation in
+            gate.arm(continuation)
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:             gate.succeed()
+                case .failed(let error): gate.fail("\(error)")
+                case .cancelled:         gate.fail("listener was cancelled")
+                case .waiting(let error): gate.noteWaiting("\(error)")
+                default:                 break
+                }
+            }
+            listener.start(queue: DispatchQueue(label: "torrent-listener"))
+            Task {
+                try? await Task.sleep(for: .seconds(5))
+                gate.expire()
+            }
+        }
     }
 
     /// Info hashes of active, non-private torrents (LSD/PEX-eligible).
@@ -904,7 +1065,21 @@ public actor TorrentSession {
         }
     }
 
+    /// Ceiling on incoming connections still working through their handshake.
+    /// Each one costs an actor, a dispatch queue, and up to 20s of waiting
+    /// before `adoptIncoming`'s per-torrent cap gets a chance to reject it —
+    /// so without a bound here, anyone who can reach the port can make us
+    /// allocate thousands of them.
+    private static let maxPendingHandshakes = 200
+    private var pendingHandshakes = 0
+
     private func handleIncoming(_ rawConnection: NWConnection) async {
+        guard pendingHandshakes < Self.maxPendingHandshakes else {
+            rawConnection.cancel()
+            return
+        }
+        pendingHandshakes += 1
+        defer { pendingHandshakes -= 1 }
         let connection = PeerConnection(incoming: rawConnection)
         do {
             try await connection.start()

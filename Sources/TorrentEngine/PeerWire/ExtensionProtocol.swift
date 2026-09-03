@@ -90,6 +90,11 @@ enum UTMetadata {
     static let pieceSize = 16 * 1024
     /// Sanity cap — real info dictionaries are far smaller.
     static let maxMetadataSize = 8 * 1024 * 1024
+    /// Highest piece index `maxMetadataSize` can produce. Bounding the field
+    /// here (rather than at each use) keeps `piece * pieceSize` from
+    /// overflowing in callers: bencode accepts 19 digits, which reaches
+    /// `Int.max` exactly, and Swift traps on overflow.
+    static let maxPieces = maxMetadataSize / pieceSize
 
     enum MessageType: Int {
         case request = 0
@@ -132,7 +137,7 @@ enum UTMetadata {
         guard let (header, consumed) = try? Bencode.decodePrefix(payload),
               let rawType = header["msg_type"]?.integerValue,
               let type = MessageType(rawValue: rawType),
-              let piece = header["piece"]?.integerValue, piece >= 0
+              let piece = header["piece"]?.integerValue, piece >= 0, piece < maxPieces
         else { return nil }
         return Parsed(
             type: type,

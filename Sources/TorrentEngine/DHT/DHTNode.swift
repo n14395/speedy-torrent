@@ -188,10 +188,15 @@ public actor DHTNode {
 
     // MARK: - Query plumbing
 
+    /// A 2-byte counter alone wraps at 65,536 queries — reachable in a long
+    /// session — and a wrap onto a still-outstanding transaction overwrote its
+    /// entry, stranding that continuation forever. The random half makes a
+    /// collision need a 32-bit coincidence; `query` still guards against one.
     private func nextTransaction() -> Data {
         transactionCounter &+= 1
         var data = Data()
         data.appendUInt16(transactionCounter)
+        data.appendUInt16(.random(in: .min ... .max))
         return data
     }
 
@@ -206,6 +211,11 @@ public actor DHTNode {
             arguments: [("id", .string(ownID))] + arguments
         )
         return try await withCheckedThrowingContinuation { continuation in
+            // Never drop a continuation on the floor: on the vanishing chance
+            // of a collision, fail the older query rather than leaking it.
+            if let stale = pending.removeValue(forKey: transaction) {
+                stale.continuation.resume(throwing: DHTError.badResponse)
+            }
             pending[transaction] = Pending(
                 continuation: continuation,
                 deadline: .now.advanced(by: .seconds(3)),
@@ -251,11 +261,11 @@ public actor DHTNode {
             if let id = body["id"]?.stringData, id.count == 20 {
                 routing.heard(from: KRPC.NodeInfo(id: id, address: address))
             }
-            if let entry = pending.removeValue(forKey: transaction) {
+            if let entry = resolvePending(transaction, from: address) {
                 entry.continuation.resume(returning: body)
             }
         case .error(let transaction, _, let errorMessage):
-            if let entry = pending.removeValue(forKey: transaction) {
+            if let entry = resolvePending(transaction, from: address) {
                 entry.continuation.resume(throwing: DHTError.badResponse)
                 _ = errorMessage
             }
@@ -265,6 +275,17 @@ public actor DHTNode {
             }
             handleQuery(method: method, arguments: arguments, transaction: transaction, from: address)
         }
+    }
+
+    /// Claims a pending query only for the address it was actually sent to.
+    /// Otherwise any host that guessed a transaction id could answer a query it
+    /// was never asked, injecting peers and nodes into our routing table. A
+    /// mismatched reply leaves the entry pending, so the real one can still
+    /// land — and the sweeper times it out if it never does.
+    private func resolvePending(_ transaction: Data, from address: PeerAddress) -> Pending? {
+        guard let entry = pending[transaction], entry.address == address else { return nil }
+        pending[transaction] = nil
+        return entry
     }
 
     private func handleQuery(method: String, arguments: BValue, transaction: Data, from address: PeerAddress) {
@@ -354,7 +375,7 @@ public actor DHTNode {
             SavedNode(host: $0.address.host, port: $0.address.port)
         }
         if let data = try? JSONEncoder().encode(nodes) {
-            try? data.write(to: statePath)
+            try? data.write(to: statePath, options: .atomic)
         }
     }
 

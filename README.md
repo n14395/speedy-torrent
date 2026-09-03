@@ -57,7 +57,7 @@ DHT, PEX, and LSD are disabled automatically for torrents marked private.
 Requires a Swift 6 toolchain.
 
 ```sh
-Scripts/build.sh   # builds dist/SpeedyTorrent.app and a distributable .dmg
+./build.sh         # builds build/SpeedyTorrent.app and a distributable .dmg
 Scripts/test.sh    # runs the full test suite
 ```
 

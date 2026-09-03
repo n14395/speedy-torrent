@@ -50,6 +50,11 @@ final class PieceManager {
         /// Number of outstanding requests per block (endgame may exceed 1).
         var blockRequests: [Int]
         var receivedCount = 0
+        /// Lowest block index that might still be unrequested. Everything below
+        /// it is received or in flight. `unrequestedBlock` used to rescan from
+        /// zero on every call, for every in-progress piece, on every request —
+        /// up to ~24,000 iterations per call with 96 pieces of 4 MB in flight.
+        var freeHint = 0
 
         init(index: Int, size: Int) {
             self.index = index
@@ -67,6 +72,22 @@ final class PieceManager {
             block == blockCount - 1
                 ? size - block * PieceManager.blockSize
                 : PieceManager.blockSize
+        }
+
+        /// Next block nobody has asked for yet, scanning from the hint. The
+        /// arrays stay the source of truth, so the hint can only ever cost a
+        /// little extra scanning — never correctness.
+        func nextFreeBlock() -> Int? {
+            var block = freeHint
+            while block < blockCount {
+                if !blockReceived[block], blockRequests[block] == 0 {
+                    freeHint = block
+                    return block
+                }
+                block += 1
+            }
+            freeHint = blockCount
+            return nil
         }
     }
 
@@ -177,6 +198,16 @@ final class PieceManager {
         }
         wantedPieces = mask
         piecePriority = levels.map { $0 ?? .normal }
+
+        var wanted: Int64 = 0
+        var completed: Int64 = 0
+        for index in 0..<info.pieceCount where mask[index] {
+            let size = Int64(info.pieceSize(at: index))
+            wanted += size
+            if have[index] { completed += size }
+        }
+        wantedBytes = wanted
+        completedWantedBytes = completed
     }
 
     func isWanted(_ piece: Int) -> Bool {
@@ -193,30 +224,20 @@ final class PieceManager {
         return bitfield
     }
 
-    /// All pieces overlapping wanted files are verified.
-    var isWantedComplete: Bool {
-        for index in 0..<info.pieceCount where wantedPieces[index] && !have[index] {
-            return false
-        }
-        return true
-    }
+    /// All pieces overlapping wanted files are verified. Piece sizes are always
+    /// positive, so equal byte totals means every wanted piece is present.
+    var isWantedComplete: Bool { completedWantedBytes == wantedBytes }
 
-    /// Byte size of the wanted piece set (the progress denominator).
-    var wantedBytes: Int64 {
-        var total: Int64 = 0
-        for index in 0..<info.pieceCount where wantedPieces[index] {
-            total += Int64(info.pieceSize(at: index))
-        }
-        return total
-    }
-
-    var completedWantedBytes: Int64 {
-        var total: Int64 = 0
-        for index in 0..<info.pieceCount where wantedPieces[index] && have[index] {
-            total += Int64(info.pieceSize(at: index))
-        }
-        return total
-    }
+    /// Byte size of the wanted piece set (the progress denominator), and how
+    /// much of it is verified.
+    ///
+    /// Maintained incrementally rather than summed on demand: both are read on
+    /// every snapshot, and the UI takes a snapshot of every torrent twice a
+    /// second, so an O(pieceCount) scan here was four full walks of the piece
+    /// space per torrent per second. `recomputePieceMasks` rebuilds them from
+    /// scratch whenever the selection changes.
+    private(set) var wantedBytes: Int64 = 0
+    private(set) var completedWantedBytes: Int64 = 0
 
     /// True if the peer has a wanted piece we lack — the interest signal.
     func peerHasUsefulPiece(_ peerBits: Bitfield) -> Bool {
@@ -286,15 +307,12 @@ final class PieceManager {
     }
 
     private func unrequestedBlock(in progress: PieceProgress) -> BlockRef? {
-        for block in 0..<progress.blockCount
-        where !progress.blockReceived[block] && progress.blockRequests[block] == 0 {
-            return BlockRef(
-                index: progress.index,
-                begin: block * Self.blockSize,
-                length: progress.blockLength(block)
-            )
-        }
-        return nil
+        guard let block = progress.nextFreeBlock() else { return nil }
+        return BlockRef(
+            index: progress.index,
+            begin: block * Self.blockSize,
+            length: progress.blockLength(block)
+        )
     }
 
     /// Picks the next piece to start. Priority comes first — the highest
@@ -349,16 +367,27 @@ final class PieceManager {
         return best
     }
 
+    /// Pieces currently being assembled — lets the controller drop bookkeeping
+    /// it keeps alongside them (contributor sets) when they go away.
+    var inProgressIndices: Set<Int> { Set(inProgress.keys) }
+
     func markRequested(_ ref: BlockRef) {
         guard let progress = inProgress[ref.index] else { return }
-        progress.blockRequests[ref.begin / Self.blockSize] += 1
+        let block = ref.begin / Self.blockSize
+        guard block >= 0, block < progress.blockCount else { return }
+        progress.blockRequests[block] += 1
     }
 
     func cancelRequest(_ ref: BlockRef) {
         guard let progress = inProgress[ref.index] else { return }
         let block = ref.begin / Self.blockSize
+        guard block >= 0, block < progress.blockCount else { return }
         if progress.blockRequests[block] > 0 {
             progress.blockRequests[block] -= 1
+        }
+        // Free again: walk the hint back so it is offered before later blocks.
+        if progress.blockRequests[block] == 0, !progress.blockReceived[block] {
+            progress.freeHint = min(progress.freeHint, block)
         }
     }
 
@@ -394,7 +423,9 @@ final class PieceManager {
         inProgress[index] = nil
         if !have[index] {
             have[index] = true
-            completedLength += Int64(info.pieceSize(at: index))
+            let size = Int64(info.pieceSize(at: index))
+            completedLength += size
+            if wantedPieces[index] { completedWantedBytes += size }
         }
     }
 
@@ -429,6 +460,20 @@ final class PieceManager {
     func resetHave() {
         have = Bitfield(count: info.pieceCount)
         completedLength = 0
+        completedWantedBytes = 0
         inProgress.removeAll()
+    }
+
+    /// Recomputes the cached byte totals the slow way. Test-only: the whole
+    /// point of the incremental counters is not doing this at runtime.
+    func recomputedByteTotals() -> (wanted: Int64, completed: Int64) {
+        var wanted: Int64 = 0
+        var completed: Int64 = 0
+        for index in 0..<info.pieceCount where wantedPieces[index] {
+            let size = Int64(info.pieceSize(at: index))
+            wanted += size
+            if have[index] { completed += size }
+        }
+        return (wanted, completed)
     }
 }

@@ -25,13 +25,21 @@ public actor TrackerManager {
     public func announce(_ request: AnnounceRequest) async throws -> AnnounceResponse {
         var lastError: Error = TrackerError.unsupportedURL("no trackers")
         for tierIndex in tiers.indices {
-            for urlIndex in tiers[tierIndex].indices {
-                let url = tiers[tierIndex][urlIndex]
+            // Iterate a copy of the tier. `announce(to:)` suspends, and another
+            // task on this actor — `announceAll` from stop/pause, typically —
+            // can reorder the tier while we are parked there.
+            for url in tiers[tierIndex] {
                 do {
                     let response = try await announce(to: url, request: request)
-                    // Promote the responder to the front of its tier.
-                    tiers[tierIndex].remove(at: urlIndex)
-                    tiers[tierIndex].insert(url, at: 0)
+                    // Promote the responder to the front of its tier, re-finding
+                    // it by value: the index it held before the await may now
+                    // belong to a different tracker, and removing that one would
+                    // drop it from the tier for good.
+                    if tierIndex < tiers.count,
+                       let current = tiers[tierIndex].firstIndex(of: url) {
+                        tiers[tierIndex].remove(at: current)
+                        tiers[tierIndex].insert(url, at: 0)
+                    }
                     lastErrors[url] = nil
                     lastSuccess[url] = Date()
                     if let seeders = response.seeders { lastSeeders[url] = seeders }

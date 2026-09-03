@@ -679,6 +679,10 @@ struct TorrentListView: View {
         if snapshot.state == .failed, let message = snapshot.errorMessage {
             return message
         }
+        if snapshot.state == .checking, snapshot.checkProgress > 0 {
+            let percent = Int((snapshot.checkProgress * 100).rounded())
+            return "\(snapshot.state.displayName) · \(percent)%"
+        }
         return snapshot.state.displayName
     }
 

@@ -263,6 +263,12 @@ build_app() {
     <string>public.app-category.utilities</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <!-- Plain-HTTP trackers and web seeds; see project.yml for why. -->
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>CFBundleURLTypes</key>

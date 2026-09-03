@@ -333,7 +333,7 @@ struct ProgressRing: View {
                 .stroke(Surface.ringTrack, lineWidth: stroke)
             Circle()
                 .inset(by: stroke / 2)
-                .trim(from: 0, to: min(1, max(0, snapshot.progress)))
+                .trim(from: 0, to: min(1, max(0, ringFraction)))
                 .stroke(
                     snapshot.state.tint,
                     style: StrokeStyle(lineWidth: stroke, lineCap: .round)
@@ -343,6 +343,12 @@ struct ProgressRing: View {
         }
         .frame(width: diameter, height: diameter)
         .contentShape(.circle)
+    }
+
+    /// While checking, the ring tracks the hash scan rather than the download —
+    /// re-checking a large torrent takes minutes and used to show nothing.
+    private var ringFraction: Double {
+        snapshot.state == .checking ? snapshot.checkProgress : snapshot.progress
     }
 
     @ViewBuilder

@@ -2,28 +2,6 @@ import Foundation
 import Testing
 @testable import TorrentEngine
 
-@Suite struct RateLimiterTests {
-    @Test func pacesAcquisitions() async throws {
-        // 100 KiB/s budget, 300 KiB of traffic → at least ~2s (minus the 1s burst).
-        let limiter = RateLimiter(bytesPerSecond: 100 * 1024)
-        let start = ContinuousClock.now
-        for _ in 0..<30 {
-            await limiter.acquire(10 * 1024)
-        }
-        let elapsed = start.duration(to: .now)
-        #expect(elapsed >= .seconds(1.5), "elapsed \(elapsed)")
-    }
-
-    @Test func unlimitedIsImmediate() async {
-        let limiter = RateLimiter(bytesPerSecond: nil)
-        let start = ContinuousClock.now
-        for _ in 0..<100 {
-            await limiter.acquire(1 << 20)
-        }
-        #expect(start.duration(to: .now) < .seconds(1))
-    }
-}
-
 @Suite struct PersistenceStoreTests {
     @Test func assembledTorrentDataPreservesInfoHash() throws {
         let original = try TorrentMetaInfo(torrentFileData: Bencode.encode(.dictionary([

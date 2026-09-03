@@ -106,9 +106,23 @@ struct TorrentDetailView: View {
                 try? await Task.sleep(for: .seconds(1))
             }
         }
+        // Selecting another torrent reuses this view, so every @State below
+        // still describes the last one. Land any in-flight edit on the torrent
+        // it was actually made on, then clear — otherwise the pane shows the
+        // previous selection's files until the first poll of the new one lands.
+        .onChange(of: subject) { previous, _ in
+            wantedWriteTask?.cancel()
+            flushWantedEdit(for: previous)
+            peers = []
+            trackers = []
+            files = []
+            localWanted = nil
+            localWantedDeadline = nil
+            localPriorities = [:]
+        }
         .onDisappear {
             wantedWriteTask?.cancel()
-            flushWantedEdit()
+            flushWantedEdit(for: subject)
         }
     }
 
@@ -424,13 +438,15 @@ struct TorrentDetailView: View {
                 wantedWriteTask = Task {
                     try? await Task.sleep(for: .milliseconds(350))
                     guard !Task.isCancelled else { return }
-                    flushWantedEdit()
+                    flushWantedEdit(for: subject)
                 }
             }
         )
     }
 
-    private func flushWantedEdit() {
+    /// Takes its target explicitly: the debounced write below outlives a
+    /// selection change, and must land on the torrent the checkbox was on.
+    private func flushWantedEdit(for subject: TorrentSubject) {
         guard case .live(let hash) = subject,
               let wanted = localWanted, !wanted.isEmpty,
               // Don't write (and alert) for a torrent that has since gone away.

@@ -243,7 +243,14 @@ actor MagnetController {
                 else { continue }
                 switch parsed.type {
                 case .data:
-                    guard parsed.piece == requested else { continue }
+                    // Bound the chunk before storing it. An extended message may
+                    // carry up to PeerMessage.maxPayloadLength (4 MB) and
+                    // metadataSize permits 512 pieces, so an unchecked peer
+                    // could push ~2 GB into `assembled` before the info-hash
+                    // check at the end ever got to reject it.
+                    guard parsed.piece == requested,
+                          parsed.trailing.count <= UTMetadata.pieceSize
+                    else { continue }
                     assembled[parsed.piece] = parsed.trailing
                     let pieceCount = (metadataSize + UTMetadata.pieceSize - 1) / UTMetadata.pieceSize
                     if assembled.count == pieceCount {

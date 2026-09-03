@@ -117,6 +117,15 @@ public struct TorrentInfo: Sendable {
             throw MetaInfoError.invalidField("exactly one of length/files required")
         }
 
+        // Two entries with the same path map to one file on disk, so both would
+        // write to it at different global offsets and silently corrupt each
+        // other. (Distinct raw paths can also collide here: decoding invalid
+        // UTF-8 replaces bad bytes with U+FFFD, which can merge two names.)
+        var seenPaths = Set<String>()
+        for file in files where !seenPaths.insert(file.path.joined(separator: "/")).inserted {
+            throw MetaInfoError.invalidField("duplicate file path")
+        }
+
         let totalLength = files.reduce(Int64(0)) { $0 + $1.length }
         guard totalLength > 0 else { throw MetaInfoError.invalidField("total length") }
 

@@ -10,6 +10,9 @@ struct WebSeedClient {
         case badURL
         case httpStatus(Int)
         case shortResponse
+        /// The server answered without a usable byte range — it ignored Range,
+        /// or declared a body that isn't the slice we asked for.
+        case rangeNotHonoured
     }
 
     init(info: TorrentInfo, session: URLSession = .shared) {
@@ -75,23 +78,30 @@ struct WebSeedClient {
         request.setValue("bytes=\(offset)-\(offset + Int64(length) - 1)", forHTTPHeaderField: "Range")
         let (data, response) = try await session.data(for: request)
         // Charged before the response is even inspected, and on what arrived
-        // rather than what we keep: a server that ignores Range sends the whole
-        // file down the same link, and that traffic is just as real.
+        // rather than what we keep: bytes that crossed the link are real
+        // whether or not we end up using them.
         await torrentLimiter?.acquire(data.count)
         await sessionLimiter?.acquire(data.count)
         guard let http = response as? HTTPURLResponse else { throw WebSeedError.shortResponse }
-        switch http.statusCode {
-        case 206:
-            guard data.count == length else { throw WebSeedError.shortResponse }
-            return data
-        case 200:
-            // Server ignored Range and sent the whole file; slice our part out.
-            let start = Int(offset)
-            guard data.count >= start + length else { throw WebSeedError.shortResponse }
-            return data.subdata(in: start..<start + length)
-        default:
-            throw WebSeedError.httpStatus(http.statusCode)
+        guard http.statusCode == 206 else {
+            // A 200 means the server ignored Range and sent the whole file.
+            // We used to slice our part out of it — but `data(for:)` has
+            // already buffered the entire body by then, so a 4 GB file in the
+            // torrent was a 4 GB allocation, retried in a loop. A mirror that
+            // won't do ranges is not a usable web seed; rotate to the next one.
+            throw http.statusCode == 200
+                ? WebSeedError.rangeNotHonoured
+                : WebSeedError.httpStatus(http.statusCode)
         }
+        // A single-range 206 must carry Content-Length (RFC 7233), and
+        // URLSession bounds the body by it — so agreeing here also bounds what
+        // could have been buffered. A 206 sent chunked with no length is the
+        // one case left unbounded; it is non-conformant and rare.
+        guard http.expectedContentLength == Int64(length) else {
+            throw WebSeedError.rangeNotHonoured
+        }
+        guard data.count == length else { throw WebSeedError.shortResponse }
+        return data
     }
 
     /// Builds the URL for a file under a web-seed base (BEP 19).

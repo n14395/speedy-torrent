@@ -13,25 +13,63 @@ struct MenuBarView: View {
     /// The row under the pointer, whose ring shows its control instead of its
     /// progress readout.
     @State private var hovered: InfoHash?
+    /// Hover state for the expand/collapse row, which is a control like the
+    /// torrent rows above it and should look like one.
+    @State private var hoveringMore = false
 
-    /// Rows past this fold into a "N more" row. The popup is a glance surface;
-    /// past half a dozen rows it stops being one.
+    /// Rows past this fold into a "N more" row until the popup is expanded. The
+    /// popup is a glance surface first; the whole list is one click away.
     private let rowLimit = 5
 
-    /// Active transfers first, queue order within each group — the popup should
-    /// lead with whatever is actually moving.
+    /// Remembered across openings and launches: someone who wants the long list
+    /// usually wants it every time.
+    @AppStorage(Defaults.menuBarExpanded) private var expanded = false
+    /// Measured height of the row stack, so the expanded list is exactly as
+    /// tall as its rows until it hits the cap and starts scrolling.
+    @State private var rowsHeight: CGFloat = 0
+    /// Height the popup's content actually wants, which the panel is held to.
+    @State private var contentHeight: CGFloat = 0
+
+    /// Where a torrent sits in the popup: still working toward finishing, then
+    /// finished and seeding, then stopped. Queued and errored torrents are
+    /// unfinished business, so they lead alongside the live downloads rather
+    /// than sinking below the things that are already done.
+    private func group(_ state: TorrentState) -> Int {
+        switch state {
+        case .downloading, .fetchingMetadata, .checking, .moving, .queued, .failed: 0
+        case .seeding: 1
+        case .paused: 2
+        }
+    }
+
+    /// Unfinished first, then seeding, then paused — queue order within each
+    /// group, which the offset tiebreak keeps stable.
     private var ordered: [TorrentSnapshot] {
         store.snapshots.enumerated()
             .sorted { left, right in
-                left.element.state.isActive == right.element.state.isActive
+                let leftGroup = group(left.element.state)
+                let rightGroup = group(right.element.state)
+                return leftGroup == rightGroup
                     ? left.offset < right.offset
-                    : left.element.state.isActive
+                    : leftGroup < rightGroup
             }
             .map(\.element)
     }
 
-    private var visible: [TorrentSnapshot] { Array(ordered.prefix(rowLimit)) }
-    private var overflow: Int { max(0, store.snapshots.count - rowLimit) }
+    private var visible: [TorrentSnapshot] {
+        expanded ? ordered : Array(ordered.prefix(rowLimit))
+    }
+
+    private var overflow: Int { max(0, ordered.count - rowLimit) }
+
+    /// How tall the expanded list may grow. Generous, but never past the screen
+    /// the popup hangs from — the rest scrolls.
+    private var expandedListHeight: CGFloat {
+        // Rate tiles, footer, padding and the menu bar itself.
+        let chrome: CGFloat = 190
+        let available = (NSScreen.main?.visibleFrame.height ?? 800) - chrome
+        return max(240, min(560, available))
+    }
     private var canPause: Bool {
         store.snapshots.contains { $0.state == .downloading || $0.state == .seeding || $0.state == .queued }
     }
@@ -46,6 +84,8 @@ struct MenuBarView: View {
         .padding(10)
         .frame(width: 320)
         .background(Surface.panel)
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
+        .background(MenuBarWindowAnchor(contentHeight: contentHeight))
     }
 
     // MARK: - Aggregate rates
@@ -89,11 +129,23 @@ struct MenuBarView: View {
             .background(Surface.fill, in: .rect(cornerRadius: Surface.corner))
         } else {
             VStack(spacing: 0) {
-                ForEach(Array(visible.enumerated()), id: \.element.id) { index, snapshot in
-                    if index > 0 { SurfaceSeparator() }
-                    row(snapshot)
+                if expanded {
+                    ScrollView {
+                        rowStack
+                            .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
+                                rowsHeight = $0
+                            }
+                    }
+                    // An explicit height rather than a maxHeight: a ScrollView
+                    // asked to size itself inside a window that sizes itself
+                    // has no height to settle on.
+                    .frame(height: min(max(rowsHeight, 48), expandedListHeight))
+                } else {
+                    rowStack
                 }
-                if overflow > 0 {
+                // The collapse control stays even when the list has shrunk
+                // below the fold, or an expanded popup could never be closed.
+                if expanded || overflow > 0 {
                     SurfaceSeparator()
                     moreRow
                 }
@@ -102,6 +154,15 @@ struct MenuBarView: View {
             // Clipped rather than filled through a shape so a hovered first or
             // last row follows the card's corners instead of squaring them off.
             .clipShape(.rect(cornerRadius: Surface.corner))
+        }
+    }
+
+    private var rowStack: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(visible.enumerated()), id: \.element.id) { index, snapshot in
+                if index > 0 { SurfaceSeparator() }
+                row(snapshot)
+            }
         }
     }
 
@@ -157,21 +218,28 @@ struct MenuBarView: View {
         .help("Settings for \(snapshot.name)")
     }
 
+    /// Grows the popup instead of sending the user to the main window: the
+    /// footer already has a button for that, and this is the row people reach
+    /// for when they just want to see the rest.
     private var moreRow: some View {
         HStack(spacing: 6) {
-            Text("\(overflow) more torrent\(overflow == 1 ? "" : "s")")
+            Text(expanded
+                ? "Show fewer"
+                : "\(overflow) more torrent\(overflow == 1 ? "" : "s")")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
             Spacer()
-            Image(systemName: "chevron.right")
+            Image(systemName: expanded ? "chevron.up" : "chevron.down")
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+        .background(hoveringMore ? Surface.hover : .clear)
         .contentShape(.rect)
-        .onTapGesture { openMainWindow() }
-        .help("Show all torrents")
+        .onTapGesture { expanded.toggle() }
+        .onHover { hoveringMore = $0 }
+        .help(expanded ? "Show fewer torrents" : "Show every torrent")
     }
 
     // MARK: - Controls
@@ -299,6 +367,104 @@ private func progressText(done: Int64, of total: Int64) -> String {
         return "\(doneText.dropLast(unit.count + 1)) of \(totalText)"
     }
     return "\(doneText) of \(totalText)"
+}
+
+/// Holds the popup's panel to the size of its content, hanging from the menu
+/// bar.
+///
+/// Two AppKit behaviours conspire against a popup that changes height. SwiftUI
+/// grows this panel to fit taller content but does not shrink it back, so a
+/// collapsed popup keeps its expanded frame — the shadow stays the old size
+/// while the content floats inside it. And a window's frame origin is its
+/// *bottom* left, so any resize that does happen holds the bottom edge still
+/// and moves the top. Setting the frame outright fixes both at once: the
+/// height comes from what the content measured, and the top edge is planted
+/// under the menu bar, so the popup only ever moves at the bottom.
+private struct MenuBarWindowAnchor: NSViewRepresentable {
+    /// The height SwiftUI's content wants the panel to be.
+    let contentHeight: CGFloat
+
+    func makeNSView(context: Context) -> NSView { AnchorView() }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? AnchorView)?.desiredHeight = contentHeight
+    }
+
+    final class AnchorView: NSView {
+        /// The panel rests a point below the usable top of the screen (measured
+        /// on macOS 26: visible top 1289, panel top 1288). Deriving the anchor
+        /// from the screen rather than remembering where the panel started
+        /// means there is no reading that can be taken at the wrong moment —
+        /// and nothing to re-learn if SwiftUI rebuilds this view mid-resize.
+        private static let menuBarGap: CGFloat = 1
+        private var observers: [NSObjectProtocol] = []
+
+        /// Set from SwiftUI every time the content is measured.
+        var desiredHeight: CGFloat = 0 {
+            didSet {
+                guard abs(desiredHeight - oldValue) > 0.5 else { return }
+                applyGeometry()
+                pinAfterSettling()
+            }
+        }
+
+        // Torn down here rather than in `deinit`, which Swift 6 won't let touch
+        // this array: AppKit calls this with a nil window when the view leaves,
+        // which happens before it can be released. The observers hold `self`
+        // weakly regardless, so a straggler is inert.
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers.removeAll()
+            guard let window else { return }
+            let names: [Notification.Name] = [
+                NSWindow.didResizeNotification,
+                NSWindow.didMoveNotification,
+                NSWindow.didBecomeKeyNotification,
+            ]
+            for name in names {
+                observers.append(NotificationCenter.default.addObserver(
+                    forName: name, object: window, queue: .main
+                ) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        self?.applyGeometry()
+                    }
+                })
+            }
+            applyGeometry()
+        }
+
+        /// Re-applies over the next few frames: SwiftUI resizes, then
+        /// repositions, and may animate the change, so whichever lands last
+        /// has to be the one that ends up corrected.
+        private func pinAfterSettling() {
+            for delay in [0.0, 0.05, 0.12, 0.25, 0.4] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    self?.applyGeometry()
+                }
+            }
+        }
+
+        private func applyGeometry() {
+            guard let window, window.isVisible,
+                  let screen = window.screen ?? NSScreen.main
+            else { return }
+            // Before the first measurement arrives, leave the height alone and
+            // only look after the top edge.
+            let height = desiredHeight > 0 ? desiredHeight : window.frame.height
+            let frame = window.frame
+            let target = NSRect(
+                x: frame.origin.x,
+                y: screen.visibleFrame.maxY - Self.menuBarGap - height,
+                width: frame.width,
+                height: height
+            )
+            guard abs(target.origin.y - frame.origin.y) > 0.5
+                    || abs(target.height - frame.height) > 0.5
+            else { return }
+            window.setFrame(target, display: true)
+        }
+    }
 }
 
 /// The menu bar label showing aggregate transfer rates. Because this view
