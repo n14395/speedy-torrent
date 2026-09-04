@@ -3,6 +3,37 @@ import Testing
 @testable import TorrentEngine
 
 @Suite struct PerTorrentSettingsTests {
+    /// The move gauge re-measures the destination once a second, always
+    /// through the same URLs. `URL.resourceValues` caches, so a growing file
+    /// read that way reports the size it had the first time — which pinned a
+    /// single-file move's progress at zero for the whole transfer.
+    @Test func sizingAGrowingFileTracksItRatherThanCachingIt() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("growing-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // A bare file and one inside a directory: the two shapes a torrent's
+        // on-disk content takes, and they take different paths through this.
+        let loose = root.appendingPathComponent("loose.bin")
+        let tree = root.appendingPathComponent("tree", isDirectory: true)
+        try FileManager.default.createDirectory(at: tree, withIntermediateDirectories: true)
+        let nested = tree.appendingPathComponent("nested.bin")
+        try Data(repeating: 1, count: 1_000).write(to: loose)
+        try Data(repeating: 1, count: 1_000).write(to: nested)
+        #expect(TorrentController.bytesOnDisk([loose, tree]) == 2_000)
+
+        for url in [loose, nested] {
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: Data(repeating: 2, count: 9_000))
+            try handle.close()
+        }
+        // Same URL values as the first call — the answer still has to move.
+        #expect(TorrentController.bytesOnDisk([loose, tree]) == 20_000)
+    }
+
+
     /// A move reports how far it has got, and hands the ring back to the
     /// download once it lands. Within one volume a move is a rename, so this
     /// covers the bookkeeping either side of it rather than the copy itself —

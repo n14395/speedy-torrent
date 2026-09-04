@@ -585,29 +585,32 @@ actor TorrentController {
     /// Total size of everything at these paths, descending into directories.
     /// A path that isn't there yet counts as zero, which is exactly what makes
     /// this usable on a destination that is still filling up.
-    private static func bytesOnDisk(_ urls: [URL]) -> Int64 {
-        let fileManager = FileManager.default
+    ///
+    /// Deliberately `stat` rather than `URL.resourceValues`, which caches: on a
+    /// single-file torrent the same URL is re-read every tick, and the cached
+    /// answer pinned a 150 GB move's progress at whatever it read first.
+    static func bytesOnDisk(_ urls: [URL]) -> Int64 {
         var total: Int64 = 0
         for url in urls {
-            var isDirectory: ObjCBool = false
-            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+            var info = stat()
+            guard stat(url.path, &info) == 0 else { continue }
+            guard (info.st_mode & S_IFMT) == S_IFDIR else {
+                total += Int64(info.st_size)
                 continue
             }
-            guard isDirectory.boolValue else {
-                total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
-                continue
-            }
-            let keys: [URLResourceKey] = [.fileSizeKey, .isRegularFileKey]
-            guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: keys)
-            else { continue }
-            for case let child as URL in enumerator {
-                guard let values = try? child.resourceValues(forKeys: Set(keys)),
-                      values.isRegularFile == true
-                else { continue }
-                total += Int64(values.fileSize ?? 0)
+            // Relative paths, so no URL objects are involved to cache anything.
+            guard let enumerator = FileManager.default.enumerator(atPath: url.path) else { continue }
+            for case let relative as String in enumerator {
+                total += fileSize(atPath: url.appendingPathComponent(relative).path)
             }
         }
         return total
+    }
+
+    private static func fileSize(atPath path: String) -> Int64 {
+        var info = stat()
+        guard stat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return 0 }
+        return Int64(info.st_size)
     }
 
     /// Re-hashes everything on disk and rebuilds the have-set from scratch —
