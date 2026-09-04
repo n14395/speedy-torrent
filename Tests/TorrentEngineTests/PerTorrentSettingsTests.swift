@@ -19,18 +19,79 @@ import Testing
         let tree = root.appendingPathComponent("tree", isDirectory: true)
         try FileManager.default.createDirectory(at: tree, withIntermediateDirectories: true)
         let nested = tree.appendingPathComponent("nested.bin")
-        try Data(repeating: 1, count: 1_000).write(to: loose)
-        try Data(repeating: 1, count: 1_000).write(to: nested)
-        #expect(TorrentController.bytesOnDisk([loose, tree]) == 2_000)
+        try Data(repeating: 1, count: 400_000).write(to: loose)
+        try Data(repeating: 1, count: 400_000).write(to: nested)
+        // Occupied blocks, so this is the written size rounded up to whole
+        // blocks rather than an exact byte count.
+        let first = TorrentController.bytesOnDisk([loose, tree])
+        #expect(first >= 800_000)
+        #expect(first < 900_000)
 
         for url in [loose, nested] {
             let handle = try FileHandle(forWritingTo: url)
             try handle.seekToEnd()
-            try handle.write(contentsOf: Data(repeating: 2, count: 9_000))
+            try handle.write(contentsOf: Data(repeating: 2, count: 400_000))
             try handle.close()
         }
         // Same URL values as the first call — the answer still has to move.
-        #expect(TorrentController.bytesOnDisk([loose, tree]) == 20_000)
+        let second = TorrentController.bytesOnDisk([loose, tree])
+        #expect(second >= 1_600_000, "growth went unnoticed: \(first) then \(second)")
+        #expect(second < 1_800_000)
+    }
+
+    /// A torrent's `.part` files are sized up front with `truncate`, so a
+    /// part-finished download is long but nearly empty. Moving it must carry
+    /// the holes rather than filling them in: the old `FileManager.moveItem`
+    /// wrote out every zero, which cost the torrent's full length in both time
+    /// and destination space.
+    @Test func movingSparseContentKeepsItSparse() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sparse-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        // 256 MB long, 8 MB of it real — the shape of an early download.
+        let logicalLength: Int64 = 256 << 20
+        let realBytes = 8 << 20
+        let source = root.appendingPathComponent("part.bin")
+        FileManager.default.createFile(atPath: source.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: source)
+        try handle.truncate(atOffset: UInt64(logicalLength))
+        try handle.seek(toOffset: 0)
+        try handle.write(contentsOf: Data(repeating: 9, count: realBytes))
+        try handle.close()
+
+        let occupiedBefore = TorrentController.bytesOnDisk([source])
+        #expect(occupiedBefore < logicalLength / 2, "fixture isn't sparse: \(occupiedBefore)")
+
+        // The copy path directly: a same-volume move is a rename, which never
+        // touches the data and so proves nothing about holes.
+        let destination = root.appendingPathComponent("copied.bin")
+        try SparseMove.copyPreservingHoles(from: source, to: destination)
+
+        var info = stat()
+        #expect(stat(destination.path, &info) == 0)
+        #expect(info.st_size == logicalLength, "logical length must survive the copy")
+        let occupiedAfter = TorrentController.bytesOnDisk([destination])
+        #expect(
+            occupiedAfter < logicalLength / 2,
+            "holes were filled in: \(occupiedAfter) occupied of \(logicalLength)"
+        )
+    }
+
+    /// Within one volume a move is a rename: instant, and no data read.
+    @Test func movingWithinAVolumeRenames() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rename-\(UUID().uuidString)")
+        let tree = root.appendingPathComponent("payload", isDirectory: true)
+        try FileManager.default.createDirectory(at: tree, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data(repeating: 3, count: 2_048).write(to: tree.appendingPathComponent("a.bin"))
+
+        let destination = root.appendingPathComponent("moved", isDirectory: true)
+        try SparseMove.move(from: tree, to: destination)
+        #expect(!FileManager.default.fileExists(atPath: tree.path))
+        #expect(FileManager.default.fileExists(atPath: destination.appendingPathComponent("a.bin").path))
     }
 
 

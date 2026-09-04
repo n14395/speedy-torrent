@@ -547,7 +547,7 @@ actor TorrentController {
             // Off-actor: cross-volume moves copy and can take a while.
             try await Task.detached(priority: .utility) {
                 for (source, destination) in moves {
-                    try fileManager.moveItem(at: source, to: destination)
+                    try SparseMove.move(from: source, to: destination)
                 }
             }.value
             endMoveTracking()
@@ -582,9 +582,15 @@ actor TorrentController {
         moveProgress = 0
     }
 
-    /// Total size of everything at these paths, descending into directories.
-    /// A path that isn't there yet counts as zero, which is exactly what makes
-    /// this usable on a destination that is still filling up.
+    /// Bytes actually occupied on disk by everything at these paths,
+    /// descending into directories. A path that isn't there yet counts as
+    /// zero, which is exactly what makes this usable on a destination that is
+    /// still filling up.
+    ///
+    /// Blocks rather than length, because the engine's files are sparse: a
+    /// half-downloaded torrent is as long as the finished one would be, and
+    /// measuring length would have every move read as complete from the first
+    /// tick. Blocks measure the data that genuinely has to travel.
     ///
     /// Deliberately `stat` rather than `URL.resourceValues`, which caches: on a
     /// single-file torrent the same URL is re-read every tick, and the cached
@@ -595,22 +601,22 @@ actor TorrentController {
             var info = stat()
             guard stat(url.path, &info) == 0 else { continue }
             guard (info.st_mode & S_IFMT) == S_IFDIR else {
-                total += Int64(info.st_size)
+                total += Int64(info.st_blocks) * 512
                 continue
             }
             // Relative paths, so no URL objects are involved to cache anything.
             guard let enumerator = FileManager.default.enumerator(atPath: url.path) else { continue }
             for case let relative as String in enumerator {
-                total += fileSize(atPath: url.appendingPathComponent(relative).path)
+                total += blocksOnDisk(atPath: url.appendingPathComponent(relative).path)
             }
         }
         return total
     }
 
-    private static func fileSize(atPath path: String) -> Int64 {
+    private static func blocksOnDisk(atPath path: String) -> Int64 {
         var info = stat()
         guard stat(path, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else { return 0 }
-        return Int64(info.st_size)
+        return Int64(info.st_blocks) * 512
     }
 
     /// Re-hashes everything on disk and rebuilds the have-set from scratch —
