@@ -3,6 +3,40 @@ import Testing
 @testable import TorrentEngine
 
 @Suite struct PerTorrentSettingsTests {
+    /// A move reports how far it has got, and hands the ring back to the
+    /// download once it lands. Within one volume a move is a rename, so this
+    /// covers the bookkeeping either side of it rather than the copy itself —
+    /// that needs a second volume, and was verified against a real one.
+    @Test(.timeLimit(.minutes(2)))
+    func moveProgressIsReportedAndCleared() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("moveprogress-\(UUID().uuidString)")
+        let content = root.appendingPathComponent("payload")
+        let destination = root.appendingPathComponent("elsewhere")
+        try FileManager.default.createDirectory(at: content, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data(repeating: 7, count: 300_000).write(to: content.appendingPathComponent("file.bin"))
+        let torrentData = try TorrentBuilder.makeTorrentData(contentsOf: content, pieceLength: 32 * 1024)
+
+        let session = TorrentSession(configuration: .init(
+            downloadDirectory: root, listenPort: 0, enableDHT: false
+        ))
+        let hash = try await session.addTorrent(fileData: torrentData)
+        #expect(await session.snapshots().first?.moveProgress == 0)
+
+        try await session.setDownloadDirectory(destination, for: hash)
+        let after = await session.snapshots().first
+        // Cleared, not left pinned at whatever the last sample happened to be.
+        #expect(after?.moveProgress == 0)
+        #expect(after?.state != .moving)
+        #expect(after?.downloadDirectory == destination.path)
+        #expect(FileManager.default.fileExists(
+            atPath: destination.appendingPathComponent("payload/file.bin").path
+        ))
+        await session.shutdown()
+    }
+
     /// Change the download directory in the middle of an active transfer: the
     /// engine must move the partial content, remap storage, and finish the
     /// download in the new location with intact data.

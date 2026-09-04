@@ -345,10 +345,15 @@ struct ProgressRing: View {
         .contentShape(.circle)
     }
 
-    /// While checking, the ring tracks the hash scan rather than the download —
-    /// re-checking a large torrent takes minutes and used to show nothing.
+    /// While checking or moving, the ring tracks that job rather than the
+    /// download: both can take minutes on a large torrent, and the ring used to
+    /// show nothing but the download progress frozen where it stopped.
     private var ringFraction: Double {
-        snapshot.state == .checking ? snapshot.checkProgress : snapshot.progress
+        switch snapshot.state {
+        case .checking: snapshot.checkProgress
+        case .moving: snapshot.moveProgress
+        default: snapshot.progress
+        }
     }
 
     @ViewBuilder

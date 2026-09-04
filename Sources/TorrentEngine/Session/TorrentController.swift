@@ -103,6 +103,10 @@ public struct TorrentSnapshot: Sendable, Identifiable {
     /// How far a hash re-check has got, 0...1. Only meaningful in `.checking`;
     /// before this the UI had nothing to show for what can be minutes of work.
     public var checkProgress: Double = 0
+    /// How far a move to another folder has got, 0...1. Only meaningful in
+    /// `.moving`, and only interesting when the destination is on another
+    /// volume — a move within one volume is a rename and finishes at once.
+    public var moveProgress: Double = 0
     /// 1-based position in the session's queue (= download priority); 0 for
     /// snapshots taken outside a session's ordered listing.
     public var queuePosition: Int = 0
@@ -255,6 +259,11 @@ actor TorrentController {
     /// waiting out a re-check of a very large torrent.
     private var verifyTask: Task<Bitfield, Never>?
     private var checkProgress: Double = 0
+    private var moveProgress: Double = 0
+    /// Where the move in flight is writing, and how many bytes it is carrying,
+    /// so the tick can weigh what has landed against what was picked up.
+    private var moveDestinations: [URL] = []
+    private var moveTotalBytes: Int64 = 0
 
     init(
         info: TorrentInfo,
@@ -527,16 +536,27 @@ actor TorrentController {
                 throw SessionError.moveFailed("“\(destination.lastPathComponent)” already exists in the destination folder")
             }
             try fileManager.createDirectory(at: normalizedNew, withIntermediateDirectories: true)
+            // Measured before anything moves: once a cross-volume move starts
+            // deleting its sources, the total it started with is gone.
+            let sources = moves.map(\.0)
+            moveTotalBytes = await Task.detached(priority: .utility) {
+                Self.bytesOnDisk(sources)
+            }.value
+            moveDestinations = moves.map(\.1)
+            moveProgress = 0
             // Off-actor: cross-volume moves copy and can take a while.
             try await Task.detached(priority: .utility) {
                 for (source, destination) in moves {
                     try fileManager.moveItem(at: source, to: destination)
                 }
             }.value
+            endMoveTracking()
         } catch let error as SessionError {
+            endMoveTracking()
             state = previousState
             throw error
         } catch {
+            endMoveTracking()
             state = previousState
             throw SessionError.moveFailed(error.localizedDescription)
         }
@@ -554,6 +574,40 @@ actor TorrentController {
         state = previousState == .paused ? .paused : (pieces.isWantedComplete ? .seeding : .downloading)
         await saveResume()
         dialPeers()
+    }
+
+    private func endMoveTracking() {
+        moveDestinations = []
+        moveTotalBytes = 0
+        moveProgress = 0
+    }
+
+    /// Total size of everything at these paths, descending into directories.
+    /// A path that isn't there yet counts as zero, which is exactly what makes
+    /// this usable on a destination that is still filling up.
+    private static func bytesOnDisk(_ urls: [URL]) -> Int64 {
+        let fileManager = FileManager.default
+        var total: Int64 = 0
+        for url in urls {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else {
+                continue
+            }
+            guard isDirectory.boolValue else {
+                total += Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
+                continue
+            }
+            let keys: [URLResourceKey] = [.fileSizeKey, .isRegularFileKey]
+            guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: keys)
+            else { continue }
+            for case let child as URL in enumerator {
+                guard let values = try? child.resourceValues(forKeys: Set(keys)),
+                      values.isRegularFile == true
+                else { continue }
+                total += Int64(values.fileSize ?? 0)
+            }
+        }
+        return total
     }
 
     /// Re-hashes everything on disk and rebuilds the have-set from scratch —
@@ -789,7 +843,8 @@ actor TorrentController {
             uploadRateLimit: uploadRateLimit,
             addedAt: addedAt,
             pieceLength: info.pieceLength,
-            checkProgress: checkProgress
+            checkProgress: checkProgress,
+            moveProgress: moveProgress
         )
     }
 
@@ -1347,6 +1402,16 @@ actor TorrentController {
         tickCount += 1
         if state == .checking {
             checkProgress = await store.verifyProgress
+        }
+        // What has landed at the destination against what was picked up. The
+        // sizing walk happens off the actor: on a torrent of many files it is
+        // thousands of stats, and this runs every second.
+        if state == .moving, moveTotalBytes > 0 {
+            let destinations = moveDestinations
+            let landed = await Task.detached(priority: .utility) {
+                Self.bytesOnDisk(destinations)
+            }.value
+            moveProgress = min(1, max(0, Double(landed) / Double(moveTotalBytes)))
         }
 
         // Rates: exponential moving average of 1s deltas.
