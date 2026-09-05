@@ -345,6 +345,8 @@ struct TorrentListView: View {
     /// The two have to agree pixel-for-pixel, so they read from one place.
     private enum Col {
         static let number: CGFloat = 30
+        /// "100%" plus the header's sort chevron.
+        static let percent: CGFloat = 50
         static let size: CGFloat = 74
         static let rate: CGFloat = 80
         static let eta: CGFloat = 70
@@ -429,6 +431,7 @@ struct TorrentListView: View {
         HStack(spacing: Col.spacing) {
             sortHeader("#", \.queuePosition, width: Col.number, alignment: .leading)
             sortHeader("Name", \.name, width: nil, alignment: .leading)
+            sortHeader("%", \.progress, width: Col.percent)
             sortHeader("Size", \.totalLength, width: Col.size)
             sortHeader("Down", \.downloadRate, width: Col.rate)
             sortHeader("Up", \.uploadRate, width: Col.rate)
@@ -524,7 +527,7 @@ struct TorrentListView: View {
                 // The ring is the row's pause/resume control, as it is in the
                 // popup: it swaps its readout for the action under the pointer.
                 ProgressRing(
-                    snapshot: snapshot, diameter: Col.ring, compact: true,
+                    snapshot: snapshot, diameter: Col.ring, showsPercent: false,
                     showsControl: isHovered
                 ) {
                     if snapshot.state == .paused {
@@ -542,6 +545,14 @@ struct TorrentListView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .help(statusText(snapshot))
+
+            // Always the download's own completeness, even while the ring is
+            // tracking a check or a move: those are jobs the torrent is having
+            // done to it, not progress toward having the data.
+            Text(snapshot.totalLength > 0 ? percent(snapshot) : "—")
+                .foregroundStyle(snapshot.isComplete
+                    ? AnyShapeStyle(Color.green) : AnyShapeStyle(.secondary))
+                .frame(width: Col.percent, alignment: .trailing)
 
             Text(snapshot.totalLength > 0 ? formatBytes(snapshot.totalLength) : "—")
                 .foregroundStyle(.secondary)

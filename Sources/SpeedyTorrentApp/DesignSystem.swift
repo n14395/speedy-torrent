@@ -314,8 +314,11 @@ struct StatTile: View {
 struct ProgressRing: View {
     let snapshot: TorrentSnapshot
     var diameter: CGFloat = 27
-    /// Drops the "%" sign — below about 26pt the glyph has no room for it.
-    var compact = false
+    /// Whether a downloading torrent shows its percentage inside the ring.
+    /// Off where the percentage has a column of its own — the arc already says
+    /// how far along it is, and the glyph then says the same thing about the
+    /// state as it does in every other row.
+    var showsPercent = true
     var showsControl = false
     /// When nil the ring is not a control and never renders as a button.
     var toggle: (() -> Void)?
@@ -384,8 +387,8 @@ struct ProgressRing: View {
             Image(systemName: snapshot.state == .paused ? "play.fill" : "pause.fill")
                 .font(.system(size: glyphSize, weight: .semibold))
                 .foregroundStyle(snapshot.state.tint)
-        } else if snapshot.state == .downloading {
-            Text(compact ? percentDigits : percent(snapshot))
+        } else if showsPercent, snapshot.state == .downloading {
+            Text(percent(snapshot))
                 .font(.system(size: readoutSize, weight: .semibold))
                 .monospacedDigit()
         } else {
@@ -393,11 +396,6 @@ struct ProgressRing: View {
                 .font(.system(size: glyphSize, weight: .medium))
                 .foregroundStyle(snapshot.state.tint)
         }
-    }
-
-    /// "68" — the sign is the first thing to go when the ring gets small.
-    private var percentDigits: String {
-        "\(percentValue(snapshot.progress, complete: snapshot.isComplete))"
     }
 
     /// A glyph light enough to sit inside the ring. `TorrentState.iconName` is
