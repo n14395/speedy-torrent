@@ -291,6 +291,38 @@ actor FileStore {
             try handle.seek(toOffset: UInt64(fileOffset))
             try handle.write(contentsOf: data.subdata(in: dataRange))
         }
+        hasUnsyncedWrites = true
+    }
+
+    /// True when pieces have been written but not yet pushed to the device.
+    private var hasUnsyncedWrites = false
+
+    /// Flushes written pieces to the device.
+    ///
+    /// Returns false if any handle failed to flush, in which case the caller
+    /// must not persist a bitfield claiming those pieces.
+    ///
+    /// This exists because `write(2)` only reaches the page cache while
+    /// updating the file's modification time straight away. Fast resume trusts
+    /// its saved bitfield whenever the stamps still match — so a resume record
+    /// written after an unflushed piece claimed data that an unclean quit or an
+    /// ejected volume would silently discard, and the stamp check still passed
+    /// on the next launch. Because files are preallocated to full size, the
+    /// lost write leaves a hole of zeros rather than a short file, so nothing
+    /// downstream notices until a re-check reads it back.
+    @discardableResult
+    func synchronize() -> Bool {
+        guard hasUnsyncedWrites else { return true }
+        var flushed = true
+        for handle in handles.values {
+            do {
+                try handle.synchronize()
+            } catch {
+                flushed = false
+            }
+        }
+        if flushed { hasUnsyncedWrites = false }
+        return flushed
     }
 
     func readBlock(index: Int, begin: Int, length: Int) throws -> Data {
@@ -350,9 +382,13 @@ actor FileStore {
 
     func close() {
         for handle in handles.values {
+            // `close(2)` does not flush; a handle dropped after a write would
+            // otherwise leave those pieces in the page cache only.
+            try? handle.synchronize()
             try? handle.close()
         }
         handles.removeAll()
+        hasUnsyncedWrites = false
     }
 
     // MARK: - Piece/file mapping
@@ -383,8 +419,11 @@ actor FileStore {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int64
     }
 
+    /// Closes one span's handle, flushing first — `finalize`/`deFinalize` call
+    /// this before renaming, and a rename must not outrun the data.
     private func closeHandle(_ index: Int) {
         if let handle = handles.removeValue(forKey: index) {
+            try? handle.synchronize()
             try? handle.close()
         }
     }

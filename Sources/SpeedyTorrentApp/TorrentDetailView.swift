@@ -664,7 +664,7 @@ struct TorrentDetailView: View {
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 3) {
-                Text(peer.progress.formatted(.percent.precision(.fractionLength(0))))
+                Text(percentText(peer.progress, complete: peer.isSeed))
                     .font(.system(size: 12))
                     .monospacedDigit()
                 HStack(spacing: 8) {

@@ -329,6 +329,14 @@ struct TorrentFileTree: View {
             }
         }
 
+        /// Whether every byte this node covers is on disk. Separate from
+        /// `progress` so the readout can hold at 99% until it is actually true.
+        var isComplete: Bool {
+            if wantedLength > 0 { return wantedDone >= wantedLength }
+            if selectedCount > 0 { return true }
+            return totalLength > 0 ? totalDone >= totalLength : true
+        }
+
         /// Progress over wanted bytes when anything is wanted; otherwise raw
         /// completion, so a partly downloaded skipped file still shows a bar.
         var progress: Double {
@@ -461,7 +469,7 @@ struct TorrentFileTree: View {
         .padding(.vertical, 5)
         .padding(.leading, CGFloat(depth) * 15)
         .help(aggregate.skipped ? "Not being downloaded"
-            : aggregate.progress.formatted(.percent.precision(.fractionLength(0))))
+            : percentText(aggregate.progress, complete: aggregate.isComplete))
     }
 
     /// Priority for one file or a whole folder. Normal rows stay a faint dash
@@ -528,7 +536,8 @@ struct TorrentFileTree: View {
                 if !aggregate.skipped {
                     Capsule()
                         .fill(Surface.prominent)
-                        .frame(width: proxy.size.width * min(1, max(0, aggregate.progress)))
+                        .frame(width: proxy.size.width
+                            * displayFraction(aggregate.progress, complete: aggregate.isComplete))
                 }
             }
         }

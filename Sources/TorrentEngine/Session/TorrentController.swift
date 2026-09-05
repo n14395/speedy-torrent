@@ -115,6 +115,12 @@ public struct TorrentSnapshot: Sendable, Identifiable {
         wantedLength > 0 ? Double(completedLength) / Double(wantedLength) : 0
     }
 
+    /// Every wanted byte is verified. Progress readouts must not show 100%
+    /// before this is true — see `percentValue` in the app layer.
+    public var isComplete: Bool {
+        wantedLength > 0 && completedLength >= wantedLength
+    }
+
     public var eta: TimeInterval? {
         guard state == .downloading, downloadRate > 1 else { return nil }
         return Double(max(0, wantedLength - completedLength)) / downloadRate
@@ -447,6 +453,14 @@ actor TorrentController {
 
     private func saveResume() async {
         guard let persistence else { return }
+        // Flush before claiming anything. Fast resume trusts this bitfield on
+        // the next launch whenever the file stamps still match, and the stamps
+        // are already updated by a write that has only reached the page cache —
+        // so persisting first is how a torrent came back "complete" with a
+        // piece of zeros in it. If the flush fails, keep the older record:
+        // under-claiming costs a re-check, over-claiming costs silent
+        // corruption the user only finds by verifying.
+        guard await store.synchronize() else { return }
         let resume = ResumeData(
             infoHashHex: info.infoHash.hexString,
             bitfieldBase64: pieces.have.data.base64EncodedString(),
@@ -1388,6 +1402,10 @@ actor TorrentController {
             hasAnnouncedCompleted = true
             Task { await self.announceCompleted() }
         }
+        // Checkpoint completion now rather than waiting up to 30s for the next
+        // tick: this is the moment the user considers the torrent done, and
+        // `saveResume` flushes the data before recording it.
+        await saveResume()
         // Freed an active-download slot — let the session promote a queued one.
         if let onBecameSeed {
             Task { await onBecameSeed() }

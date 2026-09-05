@@ -110,8 +110,30 @@ struct SurfaceSeparator: View {
 
 // MARK: - Formatting
 
+/// A fraction as a whole-number percentage.
+///
+/// Floors rather than rounds, and holds at 99 until the work is genuinely
+/// finished. `.percent.precision(.fractionLength(0))` rounds, so everything
+/// from 99.5% up rendered as "100%" — which on a large torrent is minutes of
+/// still-downloading, and 100% is the one number a progress readout must never
+/// show early.
+func percentValue(_ fraction: Double, complete: Bool) -> Int {
+    if complete { return 100 }
+    return min(Int((min(1, max(0, fraction)) * 100).rounded(.down)), 99)
+}
+
+func percentText(_ fraction: Double, complete: Bool) -> String {
+    "\(percentValue(fraction, complete: complete))%"
+}
+
+/// The fraction to *draw*, held just short of full for the same reason: a
+/// closed ring or a filled bar should only ever mean done.
+func displayFraction(_ fraction: Double, complete: Bool) -> Double {
+    complete ? 1 : min(0.99, max(0, fraction))
+}
+
 func percent(_ snapshot: TorrentSnapshot) -> String {
-    snapshot.progress.formatted(.percent.precision(.fractionLength(0)))
+    percentText(snapshot.progress, complete: snapshot.isComplete)
 }
 
 /// Splits a byte rate into a short value and its unit — "5.3" and "MB/s" — so
@@ -350,9 +372,9 @@ struct ProgressRing: View {
     /// show nothing but the download progress frozen where it stopped.
     private var ringFraction: Double {
         switch snapshot.state {
-        case .checking: snapshot.checkProgress
-        case .moving: snapshot.moveProgress
-        default: snapshot.progress
+        case .checking: displayFraction(snapshot.checkProgress, complete: false)
+        case .moving: displayFraction(snapshot.moveProgress, complete: false)
+        default: displayFraction(snapshot.progress, complete: snapshot.isComplete)
         }
     }
 
@@ -375,7 +397,7 @@ struct ProgressRing: View {
 
     /// "68" — the sign is the first thing to go when the ring gets small.
     private var percentDigits: String {
-        "\(Int((min(1, max(0, snapshot.progress)) * 100).rounded()))"
+        "\(percentValue(snapshot.progress, complete: snapshot.isComplete))"
     }
 
     /// A glyph light enough to sit inside the ring. `TorrentState.iconName` is

@@ -680,8 +680,9 @@ struct TorrentListView: View {
             return message
         }
         if snapshot.state == .checking, snapshot.checkProgress > 0 {
-            let percent = Int((snapshot.checkProgress * 100).rounded())
-            return "\(snapshot.state.displayName) · \(percent)%"
+            // Still checking, so never 100 — same reason as the download readout.
+            let text = percentText(snapshot.checkProgress, complete: false)
+            return "\(snapshot.state.displayName) · \(text)"
         }
         return snapshot.state.displayName
     }
