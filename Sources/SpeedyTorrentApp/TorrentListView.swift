@@ -54,45 +54,29 @@ enum StatusFilter: String, CaseIterable, Identifiable {
 
 struct TorrentListView: View {
     @Environment(SessionStore.self) private var store
+    /// Selection, filter, sort and inspector state, shared with the main menu:
+    /// commands are built outside the view tree and cannot reach `@State`.
+    @Environment(ListState.self) private var listState
     @Environment(\.openWindow) private var openWindow
-    @State private var selection: Set<InfoHash> = []
     @State private var showingFileImporter = false
     @State private var showingMagnetSheet = false
     @State private var magnetText = ""
-    @State private var pendingRemoval: [TorrentSnapshot] = []
-    @State private var showInspector = false
-    /// Which inspector tab is showing. Owned here so it survives selection
-    /// changes, and kept separate from the add sheet's own tab state.
-    @State private var inspectorTab: TorrentDetailTab = .files
-    @State private var sortOrder: [KeyPathComparator<TorrentSnapshot>] =
-        [KeyPathComparator(\.queuePosition)]
-    @State private var searchText = ""
     /// The row under the pointer, whose ring shows its pause/resume control.
     @State private var hoveredRow: InfoHash?
-    @State private var statusFilter: StatusFilter = .all
     /// Bumped once after launch to re-create toolbar buttons (see workaround).
     @State private var toolbarRefresh = 0
-
-    /// True while the table shows the engine's queue order — the default "#"
-    /// ascending sort (or no sort at all) — the only mode where the rows can
-    /// be reordered.
-    private var isQueueOrdered: Bool {
-        sortOrder.isEmpty || (
-            sortOrder.count == 1
-                && sortOrder[0].keyPath == \TorrentSnapshot.queuePosition
-                && sortOrder[0].order == .forward
-        )
-    }
+    /// Driven by Edit ▸ Find ▸ Filter by Name.
+    @FocusState private var searchFocused: Bool
 
     /// Snapshots after search + status filter + column sort. In queue order
     /// the engine's own ordering passes through untouched.
     private var displayedSnapshots: [TorrentSnapshot] {
-        var rows = store.snapshots.filter { statusFilter.matches($0) }
-        if !searchText.isEmpty {
-            rows = rows.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+        var rows = store.snapshots.filter { listState.statusFilter.matches($0) }
+        if !listState.searchText.isEmpty {
+            rows = rows.filter { $0.name.localizedCaseInsensitiveContains(listState.searchText) }
         }
-        if !isQueueOrdered {
-            rows.sort(using: sortOrder)
+        if !listState.isQueueOrdered {
+            rows.sort(using: listState.sortComparators)
         }
         return rows
     }
@@ -141,8 +125,8 @@ struct TorrentListView: View {
             }
             toolbarRefresh += 1
         }
-        .inspector(isPresented: $showInspector) {
-            InspectorPane(selection: selection, tab: $inspectorTab)
+        .inspector(isPresented: bind(\.showInspector)) {
+            InspectorPane(selection: listState.selection, tab: bind(\.inspectorTab))
                 .environment(store)
                 .inspectorColumnWidth(min: 360, ideal: 480, max: 800)
         }
@@ -199,6 +183,7 @@ struct TorrentListView: View {
         }
         .onChange(of: store.settingsRequest) { consumeSettingsRequest() }
         .onChange(of: store.magnetRequest) { consumeMagnetRequest() }
+        .onChange(of: listState.focusSearchRequest) { searchFocused = true }
         .onAppear {
             // The menu bar sets the request before opening this window, so a
             // change notification alone would miss it.
@@ -208,25 +193,24 @@ struct TorrentListView: View {
         .confirmationDialog(
             removalTitle,
             isPresented: .init(
-                get: { !pendingRemoval.isEmpty },
-                set: { if !$0 { pendingRemoval = [] } }
+                get: { !listState.pendingRemoval.isEmpty },
+                set: { if !$0 { listState.pendingRemoval = [] } }
             )
         ) {
-            Button("Remove", role: .destructive) {
-                for snapshot in pendingRemoval {
-                    store.remove(snapshot.infoHash, deleteFiles: false)
-                }
-                pendingRemoval = []
+            // Arriving by File ▸ Remove and Trash Data asks a narrower
+            // question, so it gets the narrower dialog rather than re-offering
+            // the choice the user already made in the menu.
+            if !listState.removalTrashesData {
+                Button("Remove", role: .destructive) { confirmRemoval(deleteFiles: false) }
             }
             Button("Remove and Trash Data", role: .destructive) {
-                for snapshot in pendingRemoval {
-                    store.remove(snapshot.infoHash, deleteFiles: true)
-                }
-                pendingRemoval = []
+                confirmRemoval(deleteFiles: true)
             }
-            Button("Cancel", role: .cancel) { pendingRemoval = [] }
+            Button("Cancel", role: .cancel) { listState.pendingRemoval = [] }
         } message: {
-            Text("The torrent will stop and be forgotten. “Remove and Trash Data” also deletes the downloaded files.")
+            Text(listState.removalTrashesData
+                ? "The torrent will stop, be forgotten, and its downloaded files will be moved to the Trash."
+                : "The torrent will stop and be forgotten. “Remove and Trash Data” also deletes the downloaded files.")
         }
         .alert(
             "Something Went Wrong",
@@ -246,18 +230,29 @@ struct TorrentListView: View {
         }
     }
 
-    /// Selects a torrent and reveals its settings in the inspector — the one
-    /// place per-torrent settings live now.
-    private func showSettings(for infoHash: InfoHash) {
-        selection = [infoHash]
-        inspectorTab = .files
-        showInspector = true
+    /// A binding into the shared list state. `@Bindable` reaches only as far as
+    /// the body it is declared in, and this view is spread over a dozen
+    /// computed properties that each need one.
+    private func bind<Value>(
+        _ keyPath: ReferenceWritableKeyPath<ListState, Value>
+    ) -> Binding<Value> {
+        Binding(
+            get: { listState[keyPath: keyPath] },
+            set: { listState[keyPath: keyPath] = $0 }
+        )
+    }
+
+    private func confirmRemoval(deleteFiles: Bool) {
+        for snapshot in listState.pendingRemoval {
+            store.remove(snapshot.infoHash, deleteFiles: deleteFiles)
+        }
+        listState.pendingRemoval = []
     }
 
     private func consumeSettingsRequest() {
         guard let hash = store.settingsRequest else { return }
         store.settingsRequest = nil
-        showSettings(for: hash)
+        listState.showSettings(for: hash)
     }
 
     private func consumeMagnetRequest() {
@@ -267,9 +262,9 @@ struct TorrentListView: View {
     }
 
     private var removalTitle: String {
-        pendingRemoval.count == 1
-            ? "Remove “\(pendingRemoval[0].name)”?"
-            : "Remove \(pendingRemoval.count) torrents?"
+        listState.pendingRemoval.count == 1
+            ? "Remove “\(listState.pendingRemoval[0].name)”?"
+            : "Remove \(listState.pendingRemoval.count) torrents?"
     }
 
     // MARK: - Hero tiles
@@ -397,16 +392,16 @@ struct TorrentListView: View {
     /// search, or both.
     private var emptyState: some View {
         VStack(spacing: 6) {
-            Text(searchText.isEmpty ? statusFilter.emptyTitle : "No matches")
+            Text(listState.searchText.isEmpty ? listState.statusFilter.emptyTitle : "No matches")
                 .font(.system(size: 13, weight: .medium))
             Text(emptyDetail)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            if !searchText.isEmpty || statusFilter != .all {
+            if !listState.searchText.isEmpty || listState.statusFilter != .all {
                 SurfaceButton(title: "Show All") {
-                    searchText = ""
-                    statusFilter = .all
+                    listState.searchText = ""
+                    listState.statusFilter = .all
                 }
                 .padding(.top, 2)
             }
@@ -416,12 +411,13 @@ struct TorrentListView: View {
     }
 
     private var emptyDetail: String {
-        if !searchText.isEmpty {
-            return statusFilter == .all
-                ? "No torrent's name contains “\(searchText)”."
-                : "No \(statusFilter.rawValue.lowercased()) torrent's name contains “\(searchText)”."
+        let filter = listState.statusFilter
+        if !listState.searchText.isEmpty {
+            return filter == .all
+                ? "No torrent's name contains “\(listState.searchText)”."
+                : "No \(filter.rawValue.lowercased()) torrent's name contains “\(listState.searchText)”."
         }
-        return "Torrents appear here as soon as one is \(statusFilter.rawValue.lowercased())."
+        return "Torrents appear here as soon as one is \(filter.rawValue.lowercased())."
     }
 
     /// Our own header, because `TableColumn` takes a title string and offers no
@@ -429,43 +425,42 @@ struct TorrentListView: View {
     /// does that — so owning the header only costs column resizing.
     private var tableHeader: some View {
         HStack(spacing: Col.spacing) {
-            sortHeader("#", \.queuePosition, width: Col.number, alignment: .leading)
-            sortHeader("Name", \.name, width: nil, alignment: .leading)
-            sortHeader("%", \.progress, width: Col.percent)
-            sortHeader("Size", \.totalLength, width: Col.size)
-            sortHeader("Down", \.downloadRate, width: Col.rate)
-            sortHeader("Up", \.uploadRate, width: Col.rate)
-            sortHeader("ETA", \.etaSortKey, width: Col.eta)
-            sortHeader("Ratio", \.ratio, width: Col.ratio)
+            sortHeader(.queue, width: Col.number, alignment: .leading)
+            sortHeader(.name, width: nil, alignment: .leading)
+            sortHeader(.percent, width: Col.percent)
+            sortHeader(.size, width: Col.size)
+            sortHeader(.downloadRate, width: Col.rate)
+            sortHeader(.uploadRate, width: Col.rate)
+            sortHeader(.eta, width: Col.eta)
+            sortHeader(.ratio, width: Col.ratio)
         }
         .padding(.horizontal, Col.inset)
         .frame(height: Col.headerHeight)
     }
 
     @ViewBuilder
-    private func sortHeader<V: Comparable>(
-        _ title: String,
-        // `KeyPathComparator` wants a Sendable key path under Swift 6.
-        _ keyPath: any KeyPath<TorrentSnapshot, V> & Sendable,
+    private func sortHeader(
+        _ field: SortField,
         width: CGFloat?,
         alignment: Alignment = .trailing
     ) -> some View {
-        let isActive = sortOrder.first.map { $0.keyPath as AnyKeyPath } == keyPath as AnyKeyPath
+        let isActive = listState.sortField == field
         let label = Button {
             if isActive {
-                sortOrder[0].order = sortOrder[0].order == .forward ? .reverse : .forward
+                listState.sortAscending.toggle()
             } else {
-                sortOrder = [KeyPathComparator(keyPath, order: .forward)]
+                listState.sortField = field
+                listState.sortAscending = true
             }
         } label: {
             HStack(spacing: 3) {
                 if alignment == .trailing { Spacer(minLength: 0) }
-                Text(title.uppercased())
+                Text(field.columnTitle.uppercased())
                     .font(.system(size: 9.5, weight: .medium))
                     .tracking(0.6)
                     .foregroundStyle(isActive ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
                 if isActive {
-                    Image(systemName: sortOrder[0].order == .forward ? "chevron.up" : "chevron.down")
+                    Image(systemName: listState.sortAscending ? "chevron.up" : "chevron.down")
                         .font(.system(size: 7, weight: .bold))
                         .foregroundStyle(.secondary)
                 }
@@ -474,7 +469,7 @@ struct TorrentListView: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .help("Sort by \(title)")
+        .help("Sort by \(field.menuTitle)")
 
         if let width {
             label.frame(width: width)
@@ -489,7 +484,7 @@ struct TorrentListView: View {
     /// numbers and agree by construction — and the row keeps the selection,
     /// keyboard navigation and context menus a plain stack would lose.
     private var table: some View {
-        List(selection: $selection) {
+        List(selection: bind(\.selection)) {
             ForEach(displayedSnapshots) { snapshot in
                 row(snapshot)
                     .listRowInsets(EdgeInsets())
@@ -514,7 +509,7 @@ struct TorrentListView: View {
     }
 
     private func row(_ snapshot: TorrentSnapshot) -> some View {
-        let isSelected = selection.contains(snapshot.infoHash)
+        let isSelected = listState.selection.contains(snapshot.infoHash)
         let isHovered = hoveredRow == snapshot.infoHash
         return HStack(spacing: Col.spacing) {
             Text("\(snapshot.queuePosition)")
@@ -599,8 +594,11 @@ struct TorrentListView: View {
         HStack(spacing: 12) {
             filterPills
 
-            if !isQueueOrdered {
-                Button("Queue Order") { sortOrder = [KeyPathComparator(\.queuePosition)] }
+            if !listState.isQueueOrdered {
+                Button("Queue Order") {
+                    listState.sortField = .queue
+                    listState.sortAscending = true
+                }
                     .buttonStyle(.link)
                     .font(.caption)
                     .help("Return to queue-priority order")
@@ -651,9 +649,9 @@ struct TorrentListView: View {
         HStack(spacing: 5) {
             ForEach(StatusFilter.allCases) { filter in
                 let count = store.snapshots.count { filter.matches($0) }
-                let isOn = statusFilter == filter
+                let isOn = listState.statusFilter == filter
                 Button {
-                    statusFilter = filter
+                    listState.statusFilter = filter
                 } label: {
                     HStack(spacing: 4) {
                         if let icon = filter.systemImage {
@@ -711,10 +709,11 @@ struct TorrentListView: View {
             Button("Show in Finder") { selected.forEach { store.revealInFinder($0.infoHash) } }
             Button("Verify Data") { selected.forEach { store.recheck($0.infoHash) } }
             if selected.count == 1 {
-                Button("Settings…") { showSettings(for: selected[0].infoHash) }
+                Button("Settings…") { listState.showSettings(for: selected[0].infoHash) }
             }
             // Reordering is only meaningful in the queue-priority order.
-            if selected.count == 1, isQueueOrdered, searchText.isEmpty, statusFilter == .all {
+            if selected.count == 1, listState.isQueueOrdered,
+               listState.searchText.isEmpty, listState.statusFilter == .all {
                 let hash = selected[0].infoHash
                 let index = store.snapshots.firstIndex { $0.infoHash == hash } ?? 0
                 Menu("Move") {
@@ -729,7 +728,7 @@ struct TorrentListView: View {
                 }
             }
             Divider()
-            Button("Remove…", role: .destructive) { pendingRemoval = selected }
+            Button("Remove…", role: .destructive) { listState.requestRemoval(of: selected) }
         }
     }
 
@@ -770,15 +769,16 @@ struct TorrentListView: View {
                     selectedSnapshots.forEach { store.resume($0.infoHash) }
                 }
                 toolbarButton("folder", "Show the downloaded files in Finder",
-                              enabled: !selection.isEmpty) {
+                              enabled: !listState.selection.isEmpty) {
                     selectedSnapshots.forEach { store.revealInFinder($0.infoHash) }
                 }
-                toolbarButton("trash", "Remove selected", enabled: !selection.isEmpty) {
-                    pendingRemoval = selectedSnapshots
+                toolbarButton("trash", "Remove selected",
+                              enabled: !listState.selection.isEmpty) {
+                    listState.requestRemoval(of: selectedSnapshots)
                 }
                 toolbarButton("sidebar.trailing", "Show peers, trackers, and files for the selected torrent",
                               enabled: true) {
-                    showInspector.toggle()
+                    listState.showInspector.toggle()
                 }
             }
             .id(toolbarRefresh)
@@ -815,11 +815,12 @@ struct TorrentListView: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
-            TextField("Filter by name", text: $searchText)
+            TextField("Filter by name", text: bind(\.searchText))
                 .textFieldStyle(.plain)
                 .font(.system(size: 12))
-            if !searchText.isEmpty {
-                Button { searchText = "" } label: {
+                .focused($searchFocused)
+            if !listState.searchText.isEmpty {
+                Button { listState.searchText = "" } label: {
                     Image(systemName: "xmark.circle.fill").font(.system(size: 11))
                 }
                 .buttonStyle(.plain)
@@ -833,7 +834,7 @@ struct TorrentListView: View {
     }
 
     private var selectedSnapshots: [TorrentSnapshot] {
-        store.snapshots.filter { selection.contains($0.infoHash) }
+        store.snapshots.filter { listState.selection.contains($0.infoHash) }
     }
 
     private func pasteboardMagnet() -> String? {

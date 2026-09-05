@@ -28,6 +28,9 @@ enum Defaults {
     static let menuBarShowsUploadRate = "menuBarShowsUploadRate"
     /// Whether the popup shows its whole torrent list rather than the first few.
     static let menuBarExpanded = "menuBarExpanded"
+    /// Backing store for File ▸ Open Recent. We are not a document-based app,
+    /// so macOS keeps no recents list for us and we maintain our own.
+    static let recentTorrentPaths = "recentTorrentPaths"
 
     static func register() {
         UserDefaults.standard.register(defaults: [
@@ -49,6 +52,7 @@ enum Defaults {
             menuBarShowsDownloadRate: true,
             menuBarShowsUploadRate: true,
             menuBarExpanded: false,
+            recentTorrentPaths: [String](),
         ])
     }
 }
@@ -143,6 +147,11 @@ final class SessionStore {
 
     /// Whether this app owns both the .torrent and magnet: handlers.
     private(set) var isDefaultHandler = true
+
+    /// Torrent files opened lately, newest first, for File ▸ Open Recent.
+    /// Filtered to what still exists, so a menu of dead paths never builds up.
+    private(set) var recentTorrents: [URL] = SessionStore.loadRecentTorrents()
+    private static let recentTorrentLimit = 10
 
     private var pollTask: Task<Void, Never>?
     private var completedHashes: Set<InfoHash> = []
@@ -381,6 +390,9 @@ final class SessionStore {
         do {
             let data = try Data(contentsOf: url)
             let meta = try TorrentMetaInfo(torrentFileData: data)
+            // Noted before the duplicate check, not after: the user opened this
+            // file, and "recently opened" is the question the menu answers.
+            noteRecentTorrent(url)
             guard !isKnown(meta.info.infoHash),
                   !pendingAdds.contains(where: { $0.source == .torrentFile(data: data) })
             else {
@@ -598,7 +610,105 @@ final class SessionStore {
         }
     }
 
+    // MARK: - Recent torrent files
+
+    private static func loadRecentTorrents() -> [URL] {
+        (UserDefaults.standard.stringArray(forKey: Defaults.recentTorrentPaths) ?? [])
+            .map { URL(fileURLWithPath: $0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    private func noteRecentTorrent(_ url: URL) {
+        guard url.isFileURL else { return }
+        let standardized = url.standardizedFileURL
+        var urls = recentTorrents.filter { $0 != standardized }
+        urls.insert(standardized, at: 0)
+        recentTorrents = Array(urls.prefix(Self.recentTorrentLimit))
+        UserDefaults.standard.set(recentTorrents.map(\.path), forKey: Defaults.recentTorrentPaths)
+    }
+
+    func clearRecentTorrents() {
+        recentTorrents = []
+        UserDefaults.standard.set([String](), forKey: Defaults.recentTorrentPaths)
+    }
+
+    // MARK: - Copying
+
+    /// Puts magnet links for the given torrents on the pasteboard, one per
+    /// line. Trackers come from the engine rather than the original file, so a
+    /// copied link carries whatever the torrent is actually announcing to.
+    func copyMagnetLinks(for hashes: [InfoHash]) {
+        let selected = snapshots.filter { hashes.contains($0.infoHash) }
+        guard !selected.isEmpty else { return }
+        Task { @MainActor in
+            var links: [String] = []
+            for snapshot in selected {
+                let trackers = await self.trackerDetails(for: snapshot.infoHash)
+                links.append(Self.magnetLink(for: snapshot, trackers: trackers.map(\.url)))
+            }
+            Self.copyToPasteboard(links.joined(separator: "\n"))
+        }
+    }
+
+    func copyInfoHashes(for hashes: [InfoHash]) {
+        let selected = snapshots.filter { hashes.contains($0.infoHash) }
+        guard !selected.isEmpty else { return }
+        Self.copyToPasteboard(selected.map(\.infoHash.hexString).joined(separator: "\n"))
+    }
+
+    static func magnetLink(for snapshot: TorrentSnapshot, trackers: [String]) -> String {
+        // The query separators have to survive as separators, so they come out
+        // of the allowed set before anything is escaped into a parameter.
+        var allowed = CharacterSet.urlQueryAllowed
+        allowed.remove(charactersIn: "&=+")
+        var link = "magnet:?xt=urn:btih:\(snapshot.infoHash.hexString)"
+        if let name = snapshot.name.addingPercentEncoding(withAllowedCharacters: allowed),
+           !name.isEmpty {
+            link += "&dn=\(name)"
+        }
+        for tracker in trackers {
+            guard let encoded = tracker.addingPercentEncoding(withAllowedCharacters: allowed)
+            else { continue }
+            link += "&tr=\(encoded)"
+        }
+        return link
+    }
+
+    private static func copyToPasteboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
     // MARK: - Per-torrent settings
+
+    /// Asks for a new download folder and moves the torrent there, warning
+    /// first if there is data on disk to move. Driven by AppKit rather than
+    /// `.fileImporter` so the main menu can reach it with no window open.
+    func chooseDownloadLocation(for infoHash: InfoHash) {
+        guard let snapshot = snapshots.first(where: { $0.infoHash == infoHash }) else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "Choose"
+        panel.message = "Choose where “\(snapshot.name)” should be stored."
+        panel.directoryURL = URL(fileURLWithPath: snapshot.downloadDirectory)
+        NSApplication.shared.activate()
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        // Nothing on disk yet (or not even resolved) — no move to warn about.
+        guard snapshot.state != .fetchingMetadata, snapshot.completedLength > 0 else {
+            setDownloadLocation(url, for: infoHash)
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "Move “\(snapshot.name)” to \(url.lastPathComponent)?"
+        alert.informativeText =
+            "Existing data will be moved to the new location before the transfer continues."
+        alert.addButton(withTitle: "Move")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        setDownloadLocation(url, for: infoHash)
+    }
 
     func requestSettings(for infoHash: InfoHash) {
         settingsRequest = infoHash

@@ -42,6 +42,27 @@ public struct UDPTrackerClient: Sendable {
         }
         return try UDPTrackerPacket.parseAnnounceResponse(response, transactionID: announceTID)
     }
+
+    /// Network.framework's `localizedDescription` reads like a debugger dump
+    /// ("POSIXErrorCode(rawValue: 61): Connection refused"), so name the common
+    /// failures ourselves.
+    static func translate(_ error: NWError) -> TrackerError {
+        switch error {
+        case .posix(let code):
+            switch code {
+            case .ECONNREFUSED: return .network("Connection refused")
+            case .EHOSTUNREACH, .EHOSTDOWN: return .network("Host unreachable")
+            case .ENETUNREACH, .ENETDOWN: return .network("Network unreachable")
+            case .ETIMEDOUT: return .timeout
+            case .ECANCELED: return .network("Cancelled")
+            default: return .network(TrackerError.tidied(error.localizedDescription))
+            }
+        case .dns:
+            return .network("Host not found")
+        default:
+            return .network(TrackerError.tidied(error.localizedDescription))
+        }
+    }
 }
 
 /// Pure packet codec, separated for unit testing.
@@ -184,9 +205,9 @@ actor UDPRequester {
             case .ready:
                 return
             case .failed(let error):
-                throw TrackerError.network(error.localizedDescription)
+                throw UDPTrackerClient.translate(error)
             case .cancelled:
-                throw TrackerError.network("cancelled")
+                throw TrackerError.network("Cancelled")
             default:
                 try await Task.sleep(for: .milliseconds(50))
             }
@@ -205,7 +226,7 @@ actor UDPRequester {
             connection.send(content: payload, completion: .contentProcessed { _ in })
             let deadline = ContinuousClock.now.advanced(by: timeout)
             while ContinuousClock.now < deadline {
-                if closed { throw TrackerError.network("socket closed") }
+                if closed { throw TrackerError.network("Connection closed") }
                 while !buffered.isEmpty {
                     let datagram = buffered.removeFirst()
                     if accept(datagram) { return datagram }

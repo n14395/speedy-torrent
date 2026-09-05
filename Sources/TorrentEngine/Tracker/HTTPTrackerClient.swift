@@ -19,12 +19,62 @@ public struct HTTPTrackerClient: Sendable {
             throw TrackerError.unsupportedURL(urlString)
         }
         let data: Data
+        let response: URLResponse
         do {
-            (data, _) = try await session.data(from: url)
+            (data, response) = try await session.data(from: url)
         } catch {
-            throw TrackerError.network(error.localizedDescription)
+            throw Self.translate(error)
+        }
+        // A tracker may bencode its "failure reason" alongside a 4xx/5xx, and
+        // its own wording beats a bare status code — so only fall back to the
+        // status when the body isn't a usable announce.
+        if let http = response as? HTTPURLResponse, http.statusCode >= 400 {
+            if let reason = Self.failureReason(data) {
+                throw TrackerError.failure(reason)
+            }
+            throw TrackerError.failure("HTTP \(http.statusCode)")
         }
         return try Self.parseResponse(data)
+    }
+
+    /// Extracts a bencoded `failure reason`, if the body carries one.
+    static func failureReason(_ data: Data) -> String? {
+        guard let decoded = try? Bencode.decode(data) else { return nil }
+        return decoded["failure reason"]?.stringValue
+    }
+
+    /// Turns URLSession's errors into the engine's vocabulary. Without this a
+    /// raw `localizedDescription` ends up in the tracker list.
+    static func translate(_ error: Error) -> TrackerError {
+        guard let urlError = error as? URLError else {
+            if error is CancellationError { return .network("Cancelled") }
+            return .network((error as NSError).localizedDescription)
+        }
+        switch urlError.code {
+        case .timedOut:
+            return .timeout
+        case .cannotFindHost, .dnsLookupFailed:
+            return .network("Host not found")
+        case .cannotConnectToHost:
+            return .network("Connection refused")
+        case .networkConnectionLost:
+            return .network("Connection lost")
+        case .notConnectedToInternet:
+            return .network("No internet connection")
+        case .secureConnectionFailed:
+            return .network("Secure connection failed")
+        case .serverCertificateUntrusted, .serverCertificateHasBadDate,
+             .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid:
+            return .network("Untrusted certificate")
+        case .httpTooManyRedirects:
+            return .network("Too many redirects")
+        case .cancelled:
+            return .network("Cancelled")
+        case .badURL, .unsupportedURL:
+            return .unsupportedURL(urlError.failingURL?.absoluteString ?? "")
+        default:
+            return .network(urlError.localizedDescription)
+        }
     }
 
     static func buildURL(base: String, request: AnnounceRequest) -> URL? {

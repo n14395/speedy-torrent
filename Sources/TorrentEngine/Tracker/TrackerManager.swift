@@ -47,7 +47,7 @@ public actor TrackerManager {
                     return response
                 } catch {
                     lastError = error
-                    lastErrors[url] = String(describing: error)
+                    lastErrors[url] = TrackerError.displayMessage(for: error)
                 }
             }
         }

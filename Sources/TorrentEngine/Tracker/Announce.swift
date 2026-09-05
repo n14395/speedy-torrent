@@ -77,3 +77,42 @@ public enum TrackerError: Error, Equatable {
     case timeout
     case network(String)
 }
+
+extension TrackerError: LocalizedError {
+    public var errorDescription: String? { displayMessage }
+
+    /// Human-readable text for the tracker list. The row already shows the URL,
+    /// so these say what went wrong and nothing more.
+    public var displayMessage: String {
+        switch self {
+        case .unsupportedURL:
+            "Unsupported tracker URL"
+        case .failure(let reason):
+            // The tracker's own "failure reason" — its wording, tidied.
+            Self.tidied(reason)
+        case .badResponse:
+            "Invalid response"
+        case .timeout:
+            "No response (timed out)"
+        case .network(let detail):
+            Self.tidied(detail)
+        }
+    }
+
+    /// Display text for any error that reached the announce path, including
+    /// ones that never became a `TrackerError`.
+    public static func displayMessage(for error: Error) -> String {
+        if let tracker = error as? TrackerError { return tracker.displayMessage }
+        if error is CancellationError { return "Cancelled" }
+        return tidied((error as NSError).localizedDescription)
+    }
+
+    /// Sentence-cases a message and drops the trailing full stop that
+    /// `localizedDescription` and tracker operators both like to add.
+    static func tidied(_ message: String) -> String {
+        var text = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.hasSuffix(".") && !text.hasSuffix("..") { text.removeLast() }
+        guard let first = text.first else { return text }
+        return first.uppercased() + text.dropFirst()
+    }
+}
