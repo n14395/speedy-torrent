@@ -19,13 +19,14 @@ frameworks, wrapped in a SwiftUI app that feels like it belongs on the platform.
 
 Requires macOS 15 or later.
 
-Download the DMG and drag SpeedyTorrent to Applications. Builds are ad-hoc
-signed rather than notarized, so Gatekeeper will complain the first time —
-right-click the app and choose **Open**, or clear the quarantine flag:
-
 ```sh
-xattr -dr com.apple.quarantine /Applications/SpeedyTorrent.app
+brew tap n14395/tap
+brew install --cask speedy-torrent
 ```
+
+Or download the DMG from [Releases](../../releases) and drag SpeedyTorrent to
+Applications. Releases are Developer ID signed and notarized, so it opens
+normally.
 
 To build it yourself, see [Building](#building).
 
