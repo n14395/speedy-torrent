@@ -1,3 +1,6 @@
+// Copyright 2026 Nick Fay
+// SPDX-License-Identifier: Apache-2.0
+
 import Foundation
 
 /// Aggregate transfer statistics: the running session plus all-time counters

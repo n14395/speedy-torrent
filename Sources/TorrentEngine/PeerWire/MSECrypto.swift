@@ -1,3 +1,6 @@
+// Copyright 2026 Nick Fay
+// SPDX-License-Identifier: Apache-2.0
+
 import Foundation
 
 /// RC4 stream cipher (ARC4), used by MSE/PE. Not secure on its own — MSE uses

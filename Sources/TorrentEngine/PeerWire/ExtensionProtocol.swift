@@ -1,3 +1,6 @@
+// Copyright 2026 Nick Fay
+// SPDX-License-Identifier: Apache-2.0
+
 import Foundation
 
 /// BEP 10 extension handshake (extended message id 0), BEP 9 ut_metadata, and

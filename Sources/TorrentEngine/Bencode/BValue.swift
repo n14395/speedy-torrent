@@ -1,3 +1,6 @@
+// Copyright 2026 Nick Fay
+// SPDX-License-Identifier: Apache-2.0
+
 import Foundation
 
 /// A decoded bencode value (BEP 3).

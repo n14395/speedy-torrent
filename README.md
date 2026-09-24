@@ -139,3 +139,8 @@ not sandboxed, so it can't ship on the Mac App Store as-is.
 
 Use SpeedyTorrent for content you have the right to download and share. Linux
 ISOs are the canonical test material.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
+Third-party attribution is in [NOTICE](NOTICE).

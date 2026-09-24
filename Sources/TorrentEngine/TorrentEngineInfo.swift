@@ -1,3 +1,6 @@
+// Copyright 2026 Nick Fay
+// SPDX-License-Identifier: Apache-2.0
+
 /// Build-time constants for the engine.
 public enum TorrentEngineInfo {
     public static let version = "0.1.0"

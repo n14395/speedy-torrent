@@ -1,3 +1,6 @@
+// Copyright 2026 Nick Fay
+// SPDX-License-Identifier: Apache-2.0
+
 import Foundation
 
 /// HTTP(S) tracker announces per BEP 3, with compact peer lists (BEP 23) and

@@ -1,3 +1,6 @@
+// Copyright 2026 Nick Fay
+// SPDX-License-Identifier: Apache-2.0
+
 import Foundation
 
 /// GetRight-style web seeding (BEP 19): fetches whole pieces over HTTP using

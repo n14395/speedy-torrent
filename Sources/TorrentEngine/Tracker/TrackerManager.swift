@@ -1,3 +1,6 @@
+// Copyright 2026 Nick Fay
+// SPDX-License-Identifier: Apache-2.0
+
 import Foundation
 
 /// Announces to a torrent's trackers with BEP 12 tier semantics: try tiers in

@@ -1,3 +1,6 @@
+// Copyright 2026 Nick Fay
+// SPDX-License-Identifier: Apache-2.0
+
 import Foundation
 
 /// Big-endian binary helpers used by the peer wire, UDP tracker, and DHT
