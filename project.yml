@@ -11,8 +11,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "6.0"
-    MARKETING_VERSION: "0.4"
-    CURRENT_PROJECT_VERSION: "0.4"
+    MARKETING_VERSION: "0.5"
+    CURRENT_PROJECT_VERSION: "0.5"
     # Local, ad-hoc signing — no team required.
     CODE_SIGN_STYLE: Manual
     CODE_SIGN_IDENTITY: "-"
@@ -49,8 +49,8 @@ targets:
       path: SpeedyTorrent-Info.plist
       properties:
         CFBundleDisplayName: SpeedyTorrent
-        CFBundleShortVersionString: "0.4"
-        CFBundleVersion: "0.4"
+        CFBundleShortVersionString: "0.5"
+        CFBundleVersion: "0.5"
         CFBundleIconFile: AppIcon
         LSMinimumSystemVersion: "15.0"
         LSApplicationCategoryType: public.app-category.utilities
