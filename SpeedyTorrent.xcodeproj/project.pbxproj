@@ -741,7 +741,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.nwf.TorrentEngine;
+				PRODUCT_BUNDLE_IDENTIFIER = com.n14395.SpeedyTorrent.TorrentEngine;
 				PRODUCT_NAME = TorrentEngine;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
@@ -762,7 +762,7 @@
 					"$(inherited)",
 					"-ObjC",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.nwf.SpeedyTorrent;
+				PRODUCT_BUNDLE_IDENTIFIER = com.n14395.SpeedyTorrent;
 				PRODUCT_NAME = SpeedyTorrent;
 				SDKROOT = macosx;
 			};
@@ -780,7 +780,7 @@
 					"$(inherited)",
 					"-ObjC",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.nwf.storrent;
+				PRODUCT_BUNDLE_IDENTIFIER = com.n14395.SpeedyTorrent.storrent;
 				PRODUCT_NAME = storrent;
 				SDKROOT = macosx;
 			};
@@ -795,7 +795,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.nwf.TorrentEngine;
+				PRODUCT_BUNDLE_IDENTIFIER = com.n14395.SpeedyTorrent.TorrentEngine;
 				PRODUCT_NAME = TorrentEngine;
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
@@ -817,7 +817,7 @@
 					"$(inherited)",
 					"-ObjC",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.nwf.TorrentEngineTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.n14395.SpeedyTorrent.TorrentEngineTests;
 				SDKROOT = macosx;
 			};
 			name = Release;
@@ -834,7 +834,7 @@
 					"$(inherited)",
 					"-ObjC",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.nwf.storrent;
+				PRODUCT_BUNDLE_IDENTIFIER = com.n14395.SpeedyTorrent.storrent;
 				PRODUCT_NAME = storrent;
 				SDKROOT = macosx;
 			};
@@ -855,7 +855,7 @@
 					"$(inherited)",
 					"-ObjC",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.nwf.TorrentEngineTests;
+				PRODUCT_BUNDLE_IDENTIFIER = com.n14395.SpeedyTorrent.TorrentEngineTests;
 				SDKROOT = macosx;
 			};
 			name = Debug;
@@ -874,7 +874,7 @@
 					"$(inherited)",
 					"-ObjC",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = dev.nwf.SpeedyTorrent;
+				PRODUCT_BUNDLE_IDENTIFIER = com.n14395.SpeedyTorrent;
 				PRODUCT_NAME = SpeedyTorrent;
 				SDKROOT = macosx;
 			};

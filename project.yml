@@ -2,7 +2,7 @@
 # The generated .xcodeproj is committed; this file is the source of truth.
 name: SpeedyTorrent
 options:
-  bundleIdPrefix: dev.nwf
+  bundleIdPrefix: com.n14395
   deploymentTarget:
     macOS: "15.0"
   createIntermediateGroups: true
@@ -44,7 +44,7 @@ targets:
     settings:
       base:
         PRODUCT_NAME: SpeedyTorrent
-        PRODUCT_BUNDLE_IDENTIFIER: dev.nwf.SpeedyTorrent
+        PRODUCT_BUNDLE_IDENTIFIER: com.n14395.SpeedyTorrent
     info:
       path: SpeedyTorrent-Info.plist
       properties:
@@ -102,7 +102,7 @@ targets:
       - target: TorrentEngine
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.nwf.TorrentEngineTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.n14395.SpeedyTorrent.TorrentEngineTests
         GENERATE_INFOPLIST_FILE: "YES"
 
 schemes:
