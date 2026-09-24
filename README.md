@@ -1,4 +1,8 @@
-# SpeedyTorrent
+<p align="center">
+  <img src="app-icon.png" alt="SpeedyTorrent app icon" width="160" height="160">
+</p>
+
+<h1 align="center">SpeedyTorrent</h1>
 
 A native BitTorrent client for macOS, written entirely in Swift.
 
