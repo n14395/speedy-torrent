@@ -17,6 +17,9 @@ struct SpeedyTorrentApp: App {
             NSApplication.shared.setActivationPolicy(.regular)
             NSApplication.shared.activate()
         }
+        #if SPARKLE
+        SparkleUpdater.start()
+        #endif
     }
 
     var body: some Scene {

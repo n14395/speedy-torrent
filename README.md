@@ -9,6 +9,8 @@ The protocol engine is built from scratch — no libtorrent, no bundled daemon,
 no third-party dependencies at all. Just Swift concurrency and Apple's system
 frameworks, wrapped in a SwiftUI app that feels like it belongs on the platform.
 
+![The main window: hero tiles with live rate sparklines above four Linux ISO transfers, one seeding and three downloading](docs/01-main-window.png)
+
 ## Install
 
 Requires macOS 15 or later.
@@ -24,6 +26,8 @@ xattr -dr com.apple.quarantine /Applications/SpeedyTorrent.app
 To build it yourself, see [Building](#building).
 
 ## Features
+
+![The menu bar popover: rate tiles and a card per torrent, with the main window closed](docs/04-menu-bar-popup.png)
 
 **Transfers**
 - `.torrent` files and magnet links — magnet metadata is fetched in the
@@ -121,6 +125,8 @@ by trackerless magnet.
 
 BEP 3, 5, 7, 9, 10, 11, 12, 14, 15, 19, 20, and 23, plus MSE/PE stream
 encryption.
+
+![The inspector's Peers tab: thirty-five peers with client names, connection flags, completion and per-peer rates](docs/03-inspector-peers.png)
 
 Not yet supported: BitTorrent v2 (BEP 52), uTP, and UPnP-IGD. The app is also
 not sandboxed, so it can't ship on the Mac App Store as-is.

@@ -22,6 +22,12 @@ actor UDPSocket {
 
         var reuse: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        // Darwin raises SIGPIPE on a datagram send too — after an ICMP unreachable
+        // from one of the many DHT peers bootstrapped at launch, for instance — and
+        // the default disposition kills the whole process. Make the send fail with
+        // EPIPE instead; nothing here has a reason to stop the app over one peer.
+        var noSigPipe: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
 
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)

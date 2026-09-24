@@ -76,6 +76,9 @@ private struct AppMenuItems: View {
     let store: SessionStore
 
     var body: some View {
+        #if SPARKLE
+        SparkleCheckForUpdatesButton()
+        #endif
         Divider()
         Button("Make SpeedyTorrent the Default Torrent App") {
             store.makeDefaultHandler()

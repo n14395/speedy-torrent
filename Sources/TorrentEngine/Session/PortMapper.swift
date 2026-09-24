@@ -131,6 +131,12 @@ actor PortMapper {
                 let fd = Darwin.socket(AF_INET, SOCK_DGRAM, 0)
                 guard fd >= 0 else { continuation.resume(returning: nil); return }
                 defer { Darwin.close(fd) }
+                // This socket is connected, and on Darwin a `send` on a connected UDP
+                // socket raises SIGPIPE once the gateway has answered with ICMP port
+                // unreachable (no NAT-PMP there) — the default disposition then kills
+                // the whole app seconds after launch. Fail the send with EPIPE instead.
+                var noSigPipe: Int32 = 1
+                setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
 
                 var addr = sockaddr_in()
                 addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
